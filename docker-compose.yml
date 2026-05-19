@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: raiden-shin-postgres
+    environment:
+      POSTGRES_USER: raiden
+      POSTGRES_PASSWORD: raiden
+      POSTGRES_DB: raiden_shin_boot
+    ports:
+      - "5432:5432"
+    volumes:
+      - raiden_shin_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raiden -d raiden_shin_boot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  raiden_shin_postgres:
+

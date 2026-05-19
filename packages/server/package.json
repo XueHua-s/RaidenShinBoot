@@ -1,0 +1,39 @@
+{
+  "name": "@raiden/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./app": {
+      "source": "./src/app.ts",
+      "types": "./dist/app.d.mts",
+      "import": "./dist/app.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts src/app.ts --format esm --dts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx --conditions=source src/index.ts",
+    "start": "node dist/index.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.3",
+    "@hono/zod-validator": "^0.8.0",
+    "@raiden/database": "workspace:*",
+    "@raiden/shared": "workspace:*",
+    "dotenv": "^17.2.3",
+    "hono": "^4.12.21",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.12",
+    "typescript": "^5.9.3"
+  }
+}

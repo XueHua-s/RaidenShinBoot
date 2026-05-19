@@ -1,0 +1,49 @@
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "./schema.js";
+
+export type Database = ReturnType<typeof createDatabase>;
+
+let cachedDatabase: Database | undefined;
+let cachedSql: postgres.Sql | undefined;
+
+export function createDatabase(databaseUrl = process.env.DATABASE_URL) {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required");
+  }
+
+  const client = postgres(databaseUrl, {
+    max: 10,
+    prepare: false
+  });
+
+  return drizzle(client, { schema });
+}
+
+export function getDatabase() {
+  if (!cachedDatabase) {
+    cachedDatabase = createDatabase();
+  }
+
+  return cachedDatabase;
+}
+
+export function getSqlClient(databaseUrl = process.env.DATABASE_URL) {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required");
+  }
+
+  cachedSql ??= postgres(databaseUrl, {
+    max: 10,
+    prepare: false
+  });
+
+  return cachedSql;
+}
+
+export async function closeDatabase() {
+  await cachedSql?.end({ timeout: 5 });
+  cachedSql = undefined;
+  cachedDatabase = undefined;
+}
+

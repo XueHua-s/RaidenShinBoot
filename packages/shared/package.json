@@ -1,0 +1,41 @@
+{
+  "name": "@raiden/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./boot": {
+      "source": "./src/boot.ts",
+      "types": "./dist/boot.d.mts",
+      "import": "./dist/boot.mjs"
+    },
+    "./persona": {
+      "source": "./src/persona.ts",
+      "types": "./dist/persona.d.mts",
+      "import": "./dist/persona.mjs"
+    },
+    "./schemas": {
+      "source": "./src/schemas.ts",
+      "types": "./dist/schemas.d.mts",
+      "import": "./dist/schemas.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts src/boot.ts src/persona.ts src/schemas.ts --format esm --dts",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.64",
+    "ai": "^6.0.185",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.12",
+    "typescript": "^5.9.3"
+  }
+}

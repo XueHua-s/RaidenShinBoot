@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "customConditions": ["source"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@raiden/shared": ["packages/shared/src/index.ts"],
+      "@raiden/shared/*": ["packages/shared/src/*"],
+      "@raiden/database": ["packages/database/src/index.ts"],
+      "@raiden/database/*": ["packages/database/src/*"],
+      "@raiden/server": ["packages/server/src/index.ts"],
+      "@raiden/server/*": ["packages/server/src/*"]
+    }
+  }
+}
+

@@ -1,0 +1,25 @@
+{
+  "name": "@raiden/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "scripts": {
+    "build": "tsdown src/index.ts --format esm --dts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx --conditions=source src/index.ts",
+    "start": "node dist/index.mjs"
+  },
+  "dependencies": {
+    "@raiden/database": "workspace:*",
+    "@raiden/shared": "workspace:*",
+    "dotenv": "^17.2.3",
+    "grammy": "^1.43.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.12",
+    "typescript": "^5.9.3"
+  }
+}
