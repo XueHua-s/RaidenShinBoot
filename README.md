@@ -37,7 +37,18 @@ Fill `BOT_TOKEN` and `BOOT_API_KEY` in `.env` before starting the bot. If your r
 
 ## Local Skills
 
-The `product-designer` skill is installed under `.agents/skills/product-designer` and locked in `skills-lock.json` for panel design iteration.
+This repo follows the same local-agent convention as `DocCopilotMonorepo`:
+
+- Root agent entry files: `AGENTS.md`, `CLAUDE.md`
+- Root skill guides: `.agents/skills.md`, `.claude/skills.md`
+- Root reusable skills: `skills/*`
+- Panel agent entry files: `packages/panel/AGENTS.md`, `packages/panel/CLAUDE.md`
+- Panel skill guides: `packages/panel/.agents/skills.md`, `packages/panel/.claude/skills.md`
+- Panel reusable skills migrated from DocCopilot `app/web`: `packages/panel/skills/*`
+
+DocCopilot-specific skills were not copied. Raiden-specific replacements live in `skills/raiden-project-*` and `packages/panel/skills/raiden-panel-standards`.
+
+The `product-designer` skill is also installed under `.agents/skills/product-designer` and locked in `skills-lock.json` for Codex skill installation compatibility.
 
 ## Persona Notes
 
