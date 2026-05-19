@@ -12,13 +12,15 @@
     "dev:panel": "pnpm --filter @raiden/panel dev",
     "db:generate": "pnpm --filter @raiden/database db:generate",
     "db:migrate": "pnpm --filter @raiden/database db:migrate",
-    "db:studio": "pnpm --filter @raiden/database db:studio"
+    "db:studio": "pnpm --filter @raiden/database db:studio",
+    "test:e2e": "tsx --conditions=source scripts/e2e-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^22.18.12",
+    "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.20.6",
     "tsdown": "^0.22.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   },
   "pnpm": {

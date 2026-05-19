@@ -5,7 +5,7 @@ import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
 
 const bootEnvSchema = z.object({
   BOOT_BASE_URL: z.string().url().default("https://xhblog.top:3000/v1"),
-  BOOT_API_KEY: z.string().optional(),
+  BOOT_API_KEY: z.string().min(1, "BOOT_API_KEY is required"),
   BOOT_CHAT_MODEL: z.string().default("gpt-4o-mini"),
   BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large")
 });
@@ -28,7 +28,7 @@ export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig 
 
 function createProvider(config = getBootConfig()) {
   return createOpenAI({
-    apiKey: config.BOOT_API_KEY ?? "sk-local-placeholder",
+    apiKey: config.BOOT_API_KEY,
     baseURL: config.BOOT_BASE_URL
   });
 }
@@ -39,6 +39,12 @@ export async function embedText(value: string, config = getBootConfig()): Promis
     model: provider.embedding(config.BOOT_EMBEDDING_MODEL),
     value
   });
+
+  if (result.embedding.length !== 3072) {
+    throw new Error(
+      `BOOT_EMBEDDING_MODEL must return 3072 dimensions for halfvec(3072); received ${result.embedding.length}`
+    );
+  }
 
   return result.embedding;
 }

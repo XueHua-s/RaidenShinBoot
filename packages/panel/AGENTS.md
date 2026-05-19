@@ -32,6 +32,8 @@
   适用于信息架构、用户路径、可用性和设计系统。
 - `skills/vercel-react-best-practices/SKILL.md`
   适用于 React 性能、bundle、re-render、数据获取和渲染优化。
+- `../../skills/plan-task/SKILL.md`
+  用于跨包或 panel 涉及的 SDD planning（`SDD模式` / `sdd:plan` / `/plan-task`），需要回到仓库根目录执行。
 
 ## Working Rules
 
@@ -56,4 +58,3 @@
 - 这个目录是根 monorepo 的一个 workspace package，不是独立子模块。
 - 只改 panel 时，不要顺手修改 server/database/bot；如果 API 契约需要扩展，先明确前后端边界再跨包修改。
 - 最终交付要说明是否只影响 `packages/panel`，以及是否需要同步数据库迁移或环境变量。
-

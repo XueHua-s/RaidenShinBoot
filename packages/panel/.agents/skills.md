@@ -23,6 +23,8 @@ Use this file when Codex CLI is working inside `packages/panel`. Do not load the
   Use for product flows, IA, usability, and design-system decisions.
 - `skills/vercel-react-best-practices/SKILL.md`
   Use for React performance optimization, bundle size reduction, eliminating waterfalls, re-render optimization, and data fetching best practices.
+- `../../skills/plan-task/SKILL.md`
+  Use for SDD planning (`SDD模式` / `sdd:plan` / `/plan-task`) when panel work crosses API, database, bot, shared prompt, root scripts, or release verification boundaries.
 
 ## Local Conventions To Reuse
 
@@ -36,4 +38,3 @@ Use this file when Codex CLI is working inside `packages/panel`. Do not load the
 - Do not introduce a new library or pattern before checking the relevant skill and existing local utilities.
 - Do not bulk-load every file under `references/`; open only what the current task needs.
 - If a skill and the current codebase differ, trust the live code structure first and adapt minimally.
-

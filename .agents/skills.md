@@ -25,7 +25,7 @@ Use this file when Codex CLI needs to load local skills in the monorepo. Do not 
 - `skills/product-designer/SKILL.md`
   Use for product design, IA, usability, and design-system thinking.
 - `skills/plan-task/SKILL.md`
-  Use for SDD planning (`sdd:plan` / `/plan-task`): refining a draft task into an implementation-ready specification with architecture, decomposition, parallelization, and verification rubrics.
+  Use for SDD planning (`SDD模式` / `sdd:plan` / `/plan-task`): refining a draft task into an implementation-ready specification with architecture, decomposition, parallelization, and verification rubrics.
 
 ## Guardrails
 

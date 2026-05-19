@@ -17,15 +17,17 @@ RaidenShinBoot is a modern TypeScript monorepo for a Telegram bot whose core per
 ```bash
 pnpm install
 cp .env.example .env
-docker compose up -d
+docker compose up -d postgres
 pnpm db:generate
 pnpm db:migrate
+pnpm test:e2e
 pnpm dev:server
 pnpm dev:panel
 pnpm dev:bot
 ```
 
 Fill `BOT_TOKEN` and `BOOT_API_KEY` in `.env` before starting the bot. If your relay does not expose `/v1`, update `BOOT_BASE_URL`.
+On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
 
 ## Packages
 
@@ -42,7 +44,7 @@ This repo follows the same local-agent convention as `DocCopilotMonorepo`:
 - Root agent entry files: `AGENTS.md`, `CLAUDE.md`
 - Root skill guides: `.agents/skills.md`, `.claude/skills.md`
 - Root reusable skills: `skills/*`
-- SDD plan skill: `skills/plan-task` (`sdd:plan` maps to the installer's `plan-task` skill)
+- SDD plan skill: `skills/plan-task` (`SDD模式` / `sdd:plan` / `/plan-task` map to the installer's `plan-task` skill)
 - Panel agent entry files: `packages/panel/AGENTS.md`, `packages/panel/CLAUDE.md`
 - Panel skill guides: `packages/panel/.agents/skills.md`, `packages/panel/.claude/skills.md`
 - Panel reusable skills migrated from DocCopilot `app/web`: `packages/panel/skills/*`

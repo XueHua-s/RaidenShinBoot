@@ -33,7 +33,7 @@
 - `skills/product-designer/SKILL.md`
   用于产品设计、信息架构、用户路径、可用性和设计系统。
 - `skills/plan-task/SKILL.md`
-  用于 SDD planning（`sdd:plan` / `/plan-task`），把 draft task 细化为可实施规格、架构、拆分步骤和验证 rubric。
+  用于 SDD planning（`SDD模式` / `sdd:plan` / `/plan-task`），把 draft task 细化为可实施规格、架构、拆分步骤和验证 rubric。
 
 ## Working Rules
 

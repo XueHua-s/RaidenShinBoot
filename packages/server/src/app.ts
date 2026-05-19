@@ -6,6 +6,14 @@ import { memoriesRoute } from "./routes/memories.js";
 import { messagesRoute } from "./routes/messages.js";
 import { usersRoute } from "./routes/users.js";
 
+function corsOrigin(origin: string) {
+  if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+    return origin;
+  }
+
+  return null;
+}
+
 const api = new Hono()
   .get("/health", (c) =>
     c.json({
@@ -25,7 +33,7 @@ export const app = new Hono()
   .use(
     "*",
     cors({
-      origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+      origin: corsOrigin,
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"]
     })
@@ -43,4 +51,3 @@ export const app = new Hono()
   });
 
 export type AppType = typeof app;
-

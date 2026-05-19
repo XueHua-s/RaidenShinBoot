@@ -1,6 +1,6 @@
 ---
 name: plan-task
-description: Refine, parallelize, and verify a draft task specification into a fully planned implementation-ready task
+description: Refine, parallelize, and verify a draft task specification into a fully planned implementation-ready task. Also triggered by SDD模式, sdd:plan, or /plan-task.
 argument-hint: Path to draft task file (e.g., ".specs/tasks/draft/add-validation.feature.md") [options]
 ---
 

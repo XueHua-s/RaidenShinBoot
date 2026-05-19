@@ -11,6 +11,9 @@ importers:
       '@types/node':
         specifier: ^22.18.12
         version: 22.19.19
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
