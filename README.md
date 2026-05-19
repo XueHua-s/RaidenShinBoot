@@ -26,7 +26,7 @@ pnpm dev:panel
 pnpm dev:bot
 ```
 
-Fill `BOT_TOKEN` and `BOOT_API_KEY` in `.env` before starting the bot. If your relay does not expose `/v1`, update `BOOT_BASE_URL`.
+Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
 On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
 

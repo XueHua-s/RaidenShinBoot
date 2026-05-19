@@ -3,13 +3,16 @@ import { embed, streamText } from "ai";
 import { z } from "zod";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
 
+const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
 
 const bootEnvSchema = z.object({
   BOOT_BASE_URL: z.string().url().default("https://proxy.xhblog.top:3000/v1"),
   BOOT_CHAT_BASE_URL: optionalUrl,
   BOOT_EMBEDDING_BASE_URL: optionalUrl,
-  BOOT_API_KEY: z.string().min(1, "BOOT_API_KEY is required"),
+  BOOT_API_KEY: optionalString,
+  BOOT_CHAT_API_KEY: optionalString,
+  BOOT_EMBEDDING_API_KEY: optionalString,
   BOOT_CHAT_MODEL: z.string().default("gpt-5.5"),
   BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large")
 });
@@ -30,16 +33,24 @@ export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig 
   return bootEnvSchema.parse(env);
 }
 
+function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding") {
+  if (value) {
+    return value;
+  }
+
+  throw new Error(`BOOT_${purpose.toUpperCase()}_API_KEY or BOOT_API_KEY is required`);
+}
+
 function createChatProvider(config = getBootConfig()) {
   return createOpenAI({
-    apiKey: config.BOOT_API_KEY,
+    apiKey: resolveApiKey(config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY, "chat"),
     baseURL: config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL
   });
 }
 
 function createEmbeddingProvider(config = getBootConfig()) {
   return createOpenAI({
-    apiKey: config.BOOT_API_KEY,
+    apiKey: resolveApiKey(config.BOOT_EMBEDDING_API_KEY ?? config.BOOT_API_KEY, "embedding"),
     baseURL: config.BOOT_EMBEDDING_BASE_URL ?? config.BOOT_BASE_URL
   });
 }
