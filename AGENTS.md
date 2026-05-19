@@ -32,6 +32,8 @@
   用于管理后台 UI、页面、组件和视觉质量提升；纯 `packages/panel` 任务优先切到 panel 本地技能。
 - `skills/product-designer/SKILL.md`
   用于产品设计、信息架构、用户路径、可用性和设计系统。
+- `skills/plan-task/SKILL.md`
+  用于 SDD planning（`sdd:plan` / `/plan-task`），把 draft task 细化为可实施规格、架构、拆分步骤和验证 rubric。
 
 ## Working Rules
 
@@ -61,4 +63,3 @@
 - 只改管理后台时，不要顺手修改 bot/server/database，除非 typed API 或数据契约确实需要同步。
 - 只改 bot 命令时，先确认是否应复用 `packages/server/src/services/conversation.ts` 或抽到 shared/database，避免行为分叉。
 - 跨包改动最终交付时，要明确说明改动涉及哪些 package，以及跑过哪些验证命令。
-

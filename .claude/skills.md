@@ -24,10 +24,11 @@ Use this file when Claude needs to load local skills in the monorepo. Do not sca
   Use for UI work in `packages/panel`.
 - `skills/product-designer/SKILL.md`
   Use for product design, IA, usability, and design-system thinking.
+- `skills/plan-task/SKILL.md`
+  Use for SDD planning (`sdd:plan` / `/plan-task`): refining a draft task into an implementation-ready specification with architecture, decomposition, parallelization, and verification rubrics.
 
 ## Guardrails
 
 - Do not apply a generic solution before reading the relevant skill.
 - Do not bulk-load every file under `references/`; open only what the current task needs.
 - If a skill and the current codebase differ, trust the live code structure first and adapt minimally.
-

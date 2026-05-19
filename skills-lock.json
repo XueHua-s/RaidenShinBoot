@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "plan-task": {
+      "source": "neolabhq/context-engineering-kit",
+      "sourceType": "github",
+      "skillPath": "plugins/sdd/skills/plan-task/SKILL.md",
+      "computedHash": "1e04d4babe2731ad088dcc4ef8708feae96bb59df9357bdd1298d1d4702b5c2f"
+    },
     "product-designer": {
       "source": "borghei/claude-skills",
       "sourceType": "github",

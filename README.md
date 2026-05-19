@@ -42,6 +42,7 @@ This repo follows the same local-agent convention as `DocCopilotMonorepo`:
 - Root agent entry files: `AGENTS.md`, `CLAUDE.md`
 - Root skill guides: `.agents/skills.md`, `.claude/skills.md`
 - Root reusable skills: `skills/*`
+- SDD plan skill: `skills/plan-task` (`sdd:plan` maps to the installer's `plan-task` skill)
 - Panel agent entry files: `packages/panel/AGENTS.md`, `packages/panel/CLAUDE.md`
 - Panel skill guides: `packages/panel/.agents/skills.md`, `packages/panel/.claude/skills.md`
 - Panel reusable skills migrated from DocCopilot `app/web`: `packages/panel/skills/*`
