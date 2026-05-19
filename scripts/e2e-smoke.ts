@@ -26,8 +26,12 @@ function mockEmbedding(input: unknown) {
   return Array.from({ length: 3072 }, (_, index) => direction * (((index % 29) + 1) / 1000));
 }
 
+const onePixelPngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
 type MockRelayState = {
   chatPrompts: string[];
+  imagePrompts: string[];
   summaryPrompts: string[];
   memoryPrompts: string[];
   summaries: string[];
@@ -135,6 +139,19 @@ function createMockRelay(state: MockRelayState) {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/v1/images/generations") {
+        const body = JSON.parse(await readBody(req)) as { prompt?: string; model?: string; n?: number };
+        state.imagePrompts.push(body.prompt ?? "");
+        sendJson(res, 200, {
+          created: Math.floor(Date.now() / 1000),
+          data: Array.from({ length: body.n ?? 1 }, () => ({
+            b64_json: onePixelPngBase64,
+            revised_prompt: body.prompt ?? ""
+          }))
+        });
+        return;
+      }
+
       sendJson(res, 404, { error: "mock route not found" });
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : "mock relay error" });
@@ -158,6 +175,7 @@ async function main() {
 
   const relayState: MockRelayState = {
     chatPrompts: [],
+    imagePrompts: [],
     summaryPrompts: [],
     memoryPrompts: [],
     summaries: []
@@ -170,9 +188,13 @@ async function main() {
   const sql = getSqlClient();
 
   process.env.BOOT_BASE_URL = `http://127.0.0.1:${port}/v1`;
+  process.env.BOOT_CHAT_BASE_URL = `http://127.0.0.1:${port}/v1`;
+  process.env.BOOT_EMBEDDING_BASE_URL = `http://127.0.0.1:${port}/v1`;
+  process.env.BOOT_IMAGE_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.BOOT_API_KEY = "e2e-local-key";
   process.env.BOOT_CHAT_MODEL = "mock-chat";
   process.env.BOOT_EMBEDDING_MODEL = "mock-embedding";
+  process.env.BOOT_IMAGE_MODEL = "mock-image";
 
   try {
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
@@ -274,6 +296,29 @@ async function main() {
       throw new Error("Expected both API and bot prompts to include retrieved long-term memory");
     }
 
+    const imageResponse = await app.request("/api/images", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "稻妻夜色里的樱花与柔和雷光",
+        size: "1024x1024",
+        n: 1
+      })
+    });
+    if (!imageResponse.ok) {
+      throw new Error(`Image route failed with ${imageResponse.status}: ${await imageResponse.text()}`);
+    }
+    const imagePayload = (await imageResponse.json()) as {
+      images?: Array<{ base64?: string; mediaType?: string }>;
+    };
+    const generatedImage = imagePayload.images?.[0];
+    if (!generatedImage?.base64 || !generatedImage.mediaType?.startsWith("image/")) {
+      throw new Error("Image route returned an invalid image payload");
+    }
+    if (!relayState.imagePrompts.some((prompt) => prompt.includes("稻妻夜色") && prompt.includes("Raiden Makoto"))) {
+      throw new Error("Image prompt did not include the user request and Makoto visual guidance");
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -287,7 +332,10 @@ async function main() {
           botRecallReplyPreview: secondBotResult.reply.slice(0, 80),
           apiMemoryCount: apiMemories.length,
           botMemoryCount: botMemories.length,
+          imageMediaType: generatedImage.mediaType,
+          imageBase64Length: generatedImage.base64.length,
           memoryPromptCount: relayState.memoryPrompts.length,
+          imagePromptCount: relayState.imagePrompts.length,
           summaryCount: relayState.summaries.length,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },

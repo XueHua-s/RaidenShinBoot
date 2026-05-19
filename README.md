@@ -9,7 +9,7 @@ RaidenShinBoot is a modern TypeScript monorepo for a Telegram bot whose core per
 - Hono chain routes with `AppType` exported to the panel through `hono/client`
 - PostgreSQL, Drizzle ORM, `pgvector` `halfvec(3072)`, and HNSW vector index
 - React 19, Refine v4, Tailwind CSS v4, Vite
-- Vercel AI SDK v6 with an OpenAI-compatible relay at `https://xhblog.top:3000/v1`
+- Vercel AI SDK v6 with OpenAI-compatible relays for chat, embeddings, and image generation
 - `tsdown` for package builds and Vite for the panel
 
 ## Quick Start
@@ -28,9 +28,43 @@ pnpm dev:bot
 
 Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
+Set `BOOT_IMAGE_BASE_URL`, `BOOT_IMAGE_API_KEY`, and `BOOT_IMAGE_MODEL` to enable `/api/images` and the Telegram `/draw` command.
 On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
 
 `pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
+
+Image generation is available through:
+
+- API: `POST /api/images` with `{ "prompt": "...", "size": "1024x1024", "n": 1 }`
+- Telegram: `/draw 稻妻夜色里的樱花与柔和雷光`
+
+## AI Relay Configuration
+
+The boot client supports separate OpenAI-compatible providers per capability:
+
+| Capability | Base URL | API key | Model | Notes |
+| --- | --- | --- | --- | --- |
+| Chat | `BOOT_CHAT_BASE_URL` or `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` or `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | Default chat model is `gpt-5.5`; the configured proxy requires streaming chat completions. |
+| Embedding | `BOOT_EMBEDDING_BASE_URL` or `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` or `BOOT_API_KEY` | `BOOT_EMBEDDING_MODEL` | Must return exactly 3072 dimensions because memories are stored as `halfvec(3072)`. |
+| Image | `BOOT_IMAGE_BASE_URL` or `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` or `BOOT_API_KEY` | `BOOT_IMAGE_MODEL` | Used by `POST /api/images` and Telegram `/draw`. Returns base64 images. |
+
+Known working split configuration:
+
+```env
+BOOT_BASE_URL=https://proxy.xhblog.top:3000/v1
+BOOT_CHAT_MODEL=gpt-5.5
+BOOT_CHAT_API_KEY=
+
+BOOT_EMBEDDING_BASE_URL=https://api.burn.hair/v1
+BOOT_EMBEDDING_MODEL=text-embedding-3-large
+BOOT_EMBEDDING_API_KEY=
+
+BOOT_IMAGE_BASE_URL=https://api.burn.hair/v1
+BOOT_IMAGE_MODEL=gpt-image-1
+BOOT_IMAGE_API_KEY=
+```
+
+If one relay key can access every capability, set only `BOOT_API_KEY` and omit the capability-specific keys.
 
 ## Packages
 

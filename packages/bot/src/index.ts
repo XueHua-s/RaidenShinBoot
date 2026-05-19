@@ -1,5 +1,6 @@
 import { config } from "dotenv";
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
+import { generateMakotoImage } from "@raiden/shared/boot";
 import { getBotEnv } from "./env.js";
 import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
 
@@ -13,7 +14,8 @@ bot.api.setMyCommands([
   { command: "start", description: "开始与雷电真对话" },
   { command: "help", description: "查看可用指令" },
   { command: "memory", description: "查看最近的长期记忆" },
-  { command: "recall", description: "按内容检索长期记忆" }
+  { command: "recall", description: "按内容检索长期记忆" },
+  { command: "draw", description: "生成一张雷电真氛围图片" }
 ]);
 
 bot.command("start", async (ctx) => {
@@ -28,7 +30,8 @@ bot.command("help", async (ctx) => {
     [
       "可以直接发消息与我交谈。",
       "/memory 查看最近保存的长期记忆。",
-      "/recall 关键词 按语义检索与你有关的记忆。"
+      "/recall 关键词 按语义检索与你有关的记忆。",
+      "/draw 描述 生成一张雷电真氛围图片。"
     ].join("\n")
   );
 });
@@ -61,6 +64,30 @@ bot.command("recall", async (ctx) => {
       .map((memory, index) => `${index + 1}. ${memory.summary}（相关度 ${memory.score.toFixed(2)}）`)
       .join("\n")
   );
+});
+
+bot.command("draw", async (ctx) => {
+  const prompt = ctx.match.trim();
+  if (!prompt) {
+    await ctx.reply("请在 /draw 后写下想生成的画面。");
+    return;
+  }
+
+  await ctx.replyWithChatAction("upload_photo");
+  const result = await generateMakotoImage({
+    prompt,
+    size: "1024x1024",
+    n: 1
+  });
+  const image = result.images[0];
+  if (!image) {
+    await ctx.reply("这一次没有生成出图片。我们换一种描述再试。");
+    return;
+  }
+
+  await ctx.replyWithPhoto(new InputFile(Buffer.from(image.base64, "base64"), "raiden-makoto.png"), {
+    caption: "给你，一点温柔的雷光。"
+  });
 });
 
 bot.on("message:text", async (ctx) => {

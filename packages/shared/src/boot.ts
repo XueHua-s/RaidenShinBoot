@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { embed, streamText } from "ai";
+import { embed, generateImage, streamText } from "ai";
 import { z } from "zod";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
 
@@ -13,8 +13,11 @@ const bootEnvSchema = z.object({
   BOOT_API_KEY: optionalString,
   BOOT_CHAT_API_KEY: optionalString,
   BOOT_EMBEDDING_API_KEY: optionalString,
+  BOOT_IMAGE_API_KEY: optionalString,
   BOOT_CHAT_MODEL: z.string().default("gpt-5.5"),
-  BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large")
+  BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large"),
+  BOOT_IMAGE_BASE_URL: optionalUrl,
+  BOOT_IMAGE_MODEL: z.string().default("gpt-image-1")
 });
 
 export type BootConfig = z.infer<typeof bootEnvSchema>;
@@ -33,7 +36,7 @@ export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig 
   return bootEnvSchema.parse(env);
 }
 
-function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding") {
+function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" | "image") {
   if (value) {
     return value;
   }
@@ -52,6 +55,13 @@ function createEmbeddingProvider(config = getBootConfig()) {
   return createOpenAI({
     apiKey: resolveApiKey(config.BOOT_EMBEDDING_API_KEY ?? config.BOOT_API_KEY, "embedding"),
     baseURL: config.BOOT_EMBEDDING_BASE_URL ?? config.BOOT_BASE_URL
+  });
+}
+
+function createImageProvider(config = getBootConfig()) {
+  return createOpenAI({
+    apiKey: resolveApiKey(config.BOOT_IMAGE_API_KEY ?? config.BOOT_API_KEY, "image"),
+    baseURL: config.BOOT_IMAGE_BASE_URL ?? config.BOOT_BASE_URL
   });
 }
 
@@ -138,4 +148,32 @@ export async function summarizeForMemory(input: {
 
   const summary = text;
   return summary.toUpperCase() === "EMPTY" ? null : summary;
+}
+
+export async function generateMakotoImage(input: {
+  prompt: string;
+  size?: `${number}x${number}`;
+  n?: number;
+  config?: BootConfig;
+}) {
+  const config = input.config ?? getBootConfig();
+  const provider = createImageProvider(config);
+  const result = await generateImage({
+    model: provider.imageModel(config.BOOT_IMAGE_MODEL),
+    prompt: [
+      "Use a gentle, elegant visual mood inspired by Raiden Makoto: soft lightning, sakura, quiet Inazuma atmosphere, humane warmth.",
+      "Do not include text, logos, watermarks, UI chrome, or official game screenshots.",
+      `User image request: ${input.prompt}`
+    ].join("\n"),
+    n: input.n ?? 1,
+    size: input.size ?? "1024x1024"
+  });
+
+  return {
+    images: result.images.map((image) => ({
+      base64: image.base64,
+      mediaType: image.mediaType
+    })),
+    warnings: result.warnings.map((warning) => `${warning.type}: ${JSON.stringify(warning)}`)
+  };
 }

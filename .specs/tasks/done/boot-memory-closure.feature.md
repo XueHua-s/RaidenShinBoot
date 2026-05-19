@@ -30,3 +30,9 @@ Strengthen RaidenShinBoot boot validation so the bot proves a complete user-impr
 - Applied the fallback to both Hono API chat and grammY bot core chat paths.
 - Extended `pnpm test:e2e` to verify API and bot multi-turn memory loops, retrieved-memory prompt injection, and natural user-impression replies.
 - Verified the real relay combination with temporary keys: `proxy.xhblog.top` `gpt-5.5` streaming chat and `api.burn.hair` `text-embedding-3-large` 3072-dimensional embeddings.
+
+## Follow-up Coverage
+
+- Added image generation boot support through OpenAI-compatible image models.
+- Added Hono `POST /api/images` and Telegram `/draw` as image generation entry points.
+- Extended E2E smoke coverage to validate image generation payload shape, base64 output, media type, and Makoto visual prompt guidance.
