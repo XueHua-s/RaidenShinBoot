@@ -7,22 +7,25 @@ export type Database = ReturnType<typeof createDatabase>;
 let cachedDatabase: Database | undefined;
 let cachedSql: postgres.Sql | undefined;
 
+function createSqlClient(databaseUrl: string) {
+  return postgres(databaseUrl, {
+    max: 10,
+    prepare: false
+  });
+}
+
 export function createDatabase(databaseUrl = process.env.DATABASE_URL) {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required");
   }
 
-  const client = postgres(databaseUrl, {
-    max: 10,
-    prepare: false
-  });
-
+  const client = createSqlClient(databaseUrl);
   return drizzle(client, { schema });
 }
 
 export function getDatabase() {
   if (!cachedDatabase) {
-    cachedDatabase = createDatabase();
+    cachedDatabase = drizzle(getSqlClient(), { schema });
   }
 
   return cachedDatabase;
@@ -33,10 +36,7 @@ export function getSqlClient(databaseUrl = process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL is required");
   }
 
-  cachedSql ??= postgres(databaseUrl, {
-    max: 10,
-    prepare: false
-  });
+  cachedSql ??= createSqlClient(databaseUrl);
 
   return cachedSql;
 }
@@ -46,4 +46,3 @@ export async function closeDatabase() {
   cachedSql = undefined;
   cachedDatabase = undefined;
 }
-
