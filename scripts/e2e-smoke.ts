@@ -20,11 +20,24 @@ async function readBody(req: IncomingMessage) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function mockEmbedding() {
-  return Array.from({ length: 3072 }, (_, index) => ((index % 29) + 1) / 1000);
+function mockEmbedding(input: unknown) {
+  const text = Array.isArray(input) ? input.join(" ") : String(input ?? "");
+  const direction = /记得|印象|有什么印象|remember|impression/i.test(text) ? -1 : 1;
+  return Array.from({ length: 3072 }, (_, index) => direction * (((index % 29) + 1) / 1000));
 }
 
-function createMockRelay() {
+type MockRelayState = {
+  chatPrompts: string[];
+  summaryPrompts: string[];
+  memoryPrompts: string[];
+  summaries: string[];
+};
+
+function extractUserMessage(prompt: string) {
+  return prompt.match(/用户消息：([\s\S]*?)\n助手回复：/)?.[1]?.trim() ?? "";
+}
+
+function createMockRelay(state: MockRelayState) {
   return createServer(async (req, res) => {
     try {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
@@ -34,9 +47,38 @@ function createMockRelay() {
           messages?: Array<{ role: string; content: string }>;
         };
         const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
-        const content = system.includes("长期记忆提炼器")
-          ? "用户正在进行 RaidenShinBoot 本地端到端验证。"
-          : "你好，旅行者。我是真，这次端到端验证已经安稳地接入了雷光。";
+        const prompt = body.messages?.find((message) => message.role === "user")?.content ?? "";
+        const isSummarizer = system.includes("长期记忆提炼器");
+        let content = "你好，旅行者。我是真，这次端到端验证已经安稳地接入了雷光。";
+
+        if (isSummarizer) {
+          state.summaryPrompts.push(prompt);
+          const userMessage = extractUserMessage(prompt);
+          if (userMessage.includes("稻妻茶点")) {
+            content = "用户喜欢被称作小雪，并喜欢稻妻茶点。";
+          } else if (userMessage.includes("团子牛奶")) {
+            content = "用户在 bot 路径喜欢被称作小雪，并喜欢团子牛奶。";
+          } else if (userMessage.includes("E2E 链路")) {
+            content = "用户正在进行 RaidenShinBoot 本地端到端验证。";
+          } else if (userMessage.includes("bot 核心链路")) {
+            content = "用户正在验证 bot 核心链路。";
+          } else {
+            content = "EMPTY";
+          }
+          if (content !== "EMPTY") {
+            state.summaries.push(content);
+          }
+        } else {
+          state.chatPrompts.push(prompt);
+          if (prompt.includes("长期记忆：\n1. 用户喜欢被称作小雪，并喜欢稻妻茶点")) {
+            state.memoryPrompts.push(prompt);
+            content = "小雪，我记得你喜欢稻妻茶点；这样的印象我会好好留在心里。";
+          } else if (prompt.includes("长期记忆：\n1. 用户在 bot 路径喜欢被称作小雪，并喜欢团子牛奶")) {
+            state.memoryPrompts.push(prompt);
+            content = "小雪，我记得在 bot 路径里你喜欢团子牛奶，这也是我对你的清晰印象。";
+          }
+        }
+
         if (body.stream) {
           res.writeHead(200, {
             "content-type": "text/event-stream",
@@ -83,11 +125,11 @@ function createMockRelay() {
       }
 
       if (req.method === "POST" && req.url === "/v1/embeddings") {
-        const body = JSON.parse(await readBody(req)) as { model?: string };
+        const body = JSON.parse(await readBody(req)) as { input?: unknown; model?: string };
         sendJson(res, 200, {
           object: "list",
           model: body.model ?? "mock-embedding",
-          data: [{ object: "embedding", index: 0, embedding: mockEmbedding() }],
+          data: [{ object: "embedding", index: 0, embedding: mockEmbedding(body.input) }],
           usage: { prompt_tokens: 1, total_tokens: 1 }
         });
         return;
@@ -114,7 +156,13 @@ async function main() {
     throw new Error("DATABASE_URL is required for E2E smoke test");
   }
 
-  const server = createMockRelay();
+  const relayState: MockRelayState = {
+    chatPrompts: [],
+    summaryPrompts: [],
+    memoryPrompts: [],
+    summaries: []
+  };
+  const server = createMockRelay(relayState);
   const port = await listen(server);
   const apiTelegramUserId = `e2e-api-${Date.now()}`;
   const botUserNumericId = Date.now() % 1_000_000_000;
@@ -134,31 +182,53 @@ async function main() {
       throw new Error(`Health check failed with ${health.status}`);
     }
 
-    const chat = await app.request("/api/chat", {
+    const firstChat = await app.request("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         telegramUserId: apiTelegramUserId,
         username: "e2e_user",
-        content: "请用一句话确认本地 E2E 链路可用。"
+        content: "我喜欢你叫我小雪，也喜欢稻妻茶点。请记住这点。"
       })
     });
 
-    if (!chat.ok) {
-      throw new Error(`Chat route failed with ${chat.status}: ${await chat.text()}`);
+    if (!firstChat.ok) {
+      throw new Error(`First chat route failed with ${firstChat.status}: ${await firstChat.text()}`);
     }
 
-    const payload = (await chat.json()) as { reply?: string; memoryCount?: number };
-    if (!payload.reply || typeof payload.memoryCount !== "number") {
-      throw new Error("Chat route returned an invalid payload");
+    const firstPayload = (await firstChat.json()) as { reply?: string; memoryCount?: number };
+    if (!firstPayload.reply || typeof firstPayload.memoryCount !== "number") {
+      throw new Error("First chat route returned an invalid payload");
     }
 
     const apiMemories = await listMemories({ telegramUserId: apiTelegramUserId, limit: 5, offset: 0 });
-    if (apiMemories.length < 1) {
-      throw new Error("Expected at least one API memory created by summarizeForMemory");
+    if (!apiMemories.some((memory) => memory.summary.includes("小雪") && memory.summary.includes("稻妻茶点"))) {
+      throw new Error("Expected API memory to preserve the user's nickname and preference");
     }
 
-    const botResult = await replyAsMakoto(
+    const secondChat = await app.request("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        username: "e2e_user",
+        content: "你还记得对我的印象吗？"
+      })
+    });
+
+    if (!secondChat.ok) {
+      throw new Error(`Second chat route failed with ${secondChat.status}: ${await secondChat.text()}`);
+    }
+
+    const secondPayload = (await secondChat.json()) as { reply?: string; memoryCount?: number };
+    if (!secondPayload.reply || (secondPayload.memoryCount ?? 0) < 1) {
+      throw new Error("Second chat route did not retrieve long-term memory");
+    }
+    if (!secondPayload.reply.includes("小雪") || !secondPayload.reply.includes("稻妻茶点")) {
+      throw new Error("Second chat reply did not naturally use the stored user impression");
+    }
+
+    const firstBotResult = await replyAsMakoto(
       {
         from: {
           id: botUserNumericId,
@@ -169,15 +239,39 @@ async function main() {
         },
         message: { message_id: 42 }
       } as never,
-      "请从 bot 核心链路确认 E2E 可用。"
+      "我是 bot 路径里的小雪，也喜欢团子牛奶。请记住。"
     );
-    if (!botResult.reply) {
-      throw new Error("Bot conversation core returned an empty reply");
+    if (!firstBotResult.reply) {
+      throw new Error("First bot conversation core returned an empty reply");
     }
 
     const botMemories = await listMemories({ telegramUserId: botTelegramUserId, limit: 5, offset: 0 });
-    if (botMemories.length < 1) {
-      throw new Error("Expected at least one bot memory created by summarizeForMemory");
+    if (!botMemories.some((memory) => memory.summary.includes("小雪") && memory.summary.includes("团子牛奶"))) {
+      throw new Error("Expected bot memory to preserve the user's nickname and preference");
+    }
+
+    const secondBotResult = await replyAsMakoto(
+      {
+        from: {
+          id: botUserNumericId,
+          is_bot: false,
+          first_name: "E2E",
+          username: "e2e_bot_user",
+          language_code: "zh"
+        },
+        message: { message_id: 43 }
+      } as never,
+      "你对我有什么印象？"
+    );
+    if (secondBotResult.memoryCount < 1) {
+      throw new Error("Second bot conversation did not retrieve long-term memory");
+    }
+    if (!secondBotResult.reply.includes("小雪") || !secondBotResult.reply.includes("团子牛奶")) {
+      throw new Error("Second bot reply did not naturally use the stored user impression");
+    }
+
+    if (relayState.memoryPrompts.length < 2) {
+      throw new Error("Expected both API and bot prompts to include retrieved long-term memory");
     }
 
     console.log(
@@ -186,10 +280,15 @@ async function main() {
           ok: true,
           apiTelegramUserId,
           botTelegramUserId,
-          apiReplyPreview: payload.reply.slice(0, 80),
-          botReplyPreview: botResult.reply.slice(0, 80),
+          apiFirstMemoryCount: firstPayload.memoryCount,
+          apiRecallMemoryCount: secondPayload.memoryCount,
+          botRecallMemoryCount: secondBotResult.memoryCount,
+          apiRecallReplyPreview: secondPayload.reply.slice(0, 80),
+          botRecallReplyPreview: secondBotResult.reply.slice(0, 80),
           apiMemoryCount: apiMemories.length,
           botMemoryCount: botMemories.length,
+          memoryPromptCount: relayState.memoryPrompts.length,
+          summaryCount: relayState.summaries.length,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
         null,

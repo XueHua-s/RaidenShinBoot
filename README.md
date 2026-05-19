@@ -30,6 +30,8 @@ Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
 On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
 
+`pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
+
 ## Packages
 
 - `packages/shared`: shared schemas, API types, and Raiden Makoto persona prompt

@@ -6,6 +6,7 @@ import {
   searchMemories,
   upsertTelegramUser
 } from "@raiden/database";
+import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, summarizeForMemory } from "@raiden/shared/boot";
 
 export type ConversationInput = {
@@ -37,12 +38,19 @@ export async function handleConversation(input: ConversationInput) {
   });
 
   const queryEmbedding = await embedText(input.content);
-  const memories = await searchMemories({
+  let memories = await searchMemories({
     telegramUserId: input.telegramUserId,
     embedding: queryEmbedding,
     limit: 5,
     maxDistance: 0.55
   });
+  if (memories.length === 0 && isMemoryRecallRequest(input.content)) {
+    memories = await searchMemories({
+      telegramUserId: input.telegramUserId,
+      embedding: queryEmbedding,
+      limit: 5
+    });
+  }
   const recentMessages = await getRecentMessages(input.telegramUserId, 12);
 
   const reply = await generateMakotoReply({
@@ -86,4 +94,3 @@ export async function handleConversation(input: ConversationInput) {
     assistantMessageId: assistantMessage.id
   };
 }
-

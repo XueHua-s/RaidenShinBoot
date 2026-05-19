@@ -19,6 +19,11 @@
       "types": "./dist/persona.d.mts",
       "import": "./dist/persona.mjs"
     },
+    "./memory": {
+      "source": "./src/memory.ts",
+      "types": "./dist/memory.d.mts",
+      "import": "./dist/memory.mjs"
+    },
     "./schemas": {
       "source": "./src/schemas.ts",
       "types": "./dist/schemas.d.mts",
@@ -26,7 +31,7 @@
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/boot.ts src/persona.ts src/schemas.ts --format esm --dts",
+    "build": "tsdown src/index.ts src/boot.ts src/memory.ts src/persona.ts src/schemas.ts --format esm --dts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
