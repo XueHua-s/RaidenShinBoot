@@ -28,10 +28,20 @@
       "source": "./src/schemas.ts",
       "types": "./dist/schemas.d.mts",
       "import": "./dist/schemas.mjs"
+    },
+    "./search": {
+      "source": "./src/search.ts",
+      "types": "./dist/search.d.mts",
+      "import": "./dist/search.mjs"
+    },
+    "./tools": {
+      "source": "./src/tools.ts",
+      "types": "./dist/tools.d.mts",
+      "import": "./dist/tools.mjs"
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/boot.ts src/memory.ts src/persona.ts src/schemas.ts --format esm --dts",
+    "build": "tsdown src/index.ts src/boot.ts src/memory.ts src/persona.ts src/schemas.ts src/search.ts src/tools.ts --format esm --dts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

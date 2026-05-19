@@ -2,6 +2,8 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { embed, generateImage, streamText } from "ai";
 import { z } from "zod";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
+import type { WebSearchResponse } from "./schemas.js";
+import { formatWebSearchResultsForPrompt } from "./tools.js";
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
@@ -100,10 +102,12 @@ export async function generateMakotoReply(input: {
   content: string;
   history?: ChatHistoryItem[];
   memories?: MemoryHit[];
+  webSearch?: WebSearchResponse | null;
   config?: BootConfig;
 }): Promise<string> {
   const config = input.config ?? getBootConfig();
   const memoryContext = buildMemoryContext(input.memories ?? []);
+  const webSearchContext = input.webSearch ? formatWebSearchResultsForPrompt(input.webSearch) : "本轮没有使用联网搜索。";
   const historyText = (input.history ?? [])
     .slice(-12)
     .map((item) => `${item.role}: ${item.content}`)
@@ -116,6 +120,9 @@ export async function generateMakotoReply(input: {
 
 长期记忆：
 ${memoryContext}
+
+联网资料：
+${webSearchContext}
 
 近期对话：
 ${historyText || "暂无近期对话。"}

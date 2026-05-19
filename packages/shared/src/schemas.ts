@@ -41,7 +41,8 @@ export const chatRequestSchema = z.object({
 
 export const chatResponseSchema = z.object({
   reply: z.string(),
-  memoryCount: z.number().int().min(0)
+  memoryCount: z.number().int().min(0),
+  webSearchResultCount: z.number().int().min(0).default(0)
 });
 
 export const imageGenerationRequestSchema = z.object({
@@ -63,6 +64,25 @@ export const imageGenerationResponseSchema = z.object({
   warnings: z.array(z.string())
 });
 
+export const webSearchRequestSchema = z.object({
+  query: z.string().trim().min(1).max(500),
+  maxResults: z.number().int().min(1).max(10).default(5)
+});
+
+export const webSearchResultSchema = z.object({
+  title: z.string(),
+  url: z.string().url(),
+  snippet: z.string().optional(),
+  publishedAt: z.string().optional(),
+  source: z.string().optional()
+});
+
+export const webSearchResponseSchema = z.object({
+  query: z.string(),
+  provider: z.string(),
+  results: z.array(webSearchResultSchema)
+});
+
 export const createMemoryRequestSchema = z.object({
   telegramUserId: z.string().min(1),
   summary: z.string().min(1).max(2000),
@@ -77,4 +97,7 @@ export type ChatRequest = z.infer<typeof chatRequestSchema>;
 export type ChatResponse = z.infer<typeof chatResponseSchema>;
 export type ImageGenerationRequest = z.infer<typeof imageGenerationRequestSchema>;
 export type ImageGenerationResponse = z.infer<typeof imageGenerationResponseSchema>;
+export type WebSearchRequest = z.infer<typeof webSearchRequestSchema>;
+export type WebSearchResult = z.infer<typeof webSearchResultSchema>;
+export type WebSearchResponse = z.infer<typeof webSearchResponseSchema>;
 export type CreateMemoryRequest = z.infer<typeof createMemoryRequestSchema>;

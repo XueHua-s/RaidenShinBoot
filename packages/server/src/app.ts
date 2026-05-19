@@ -5,6 +5,7 @@ import { chatRoute } from "./routes/chat.js";
 import { imagesRoute } from "./routes/images.js";
 import { memoriesRoute } from "./routes/memories.js";
 import { messagesRoute } from "./routes/messages.js";
+import { searchRoute } from "./routes/search.js";
 import { usersRoute } from "./routes/users.js";
 
 function corsOrigin(origin: string) {
@@ -24,13 +25,15 @@ const api = new Hono()
       bootBaseUrl: process.env.BOOT_BASE_URL ?? "https://proxy.xhblog.top:3000/v1",
       bootChatBaseUrl: process.env.BOOT_CHAT_BASE_URL ?? process.env.BOOT_BASE_URL ?? "https://proxy.xhblog.top:3000/v1",
       bootEmbeddingBaseUrl: process.env.BOOT_EMBEDDING_BASE_URL ?? process.env.BOOT_BASE_URL ?? null,
-      bootImageBaseUrl: process.env.BOOT_IMAGE_BASE_URL ?? process.env.BOOT_BASE_URL ?? null
+      bootImageBaseUrl: process.env.BOOT_IMAGE_BASE_URL ?? process.env.BOOT_BASE_URL ?? null,
+      bootSearchProvider: process.env.BOOT_SEARCH_PROVIDER ?? "disabled"
     })
   )
   .route("/users", usersRoute)
   .route("/messages", messagesRoute)
   .route("/memories", memoriesRoute)
   .route("/images", imagesRoute)
+  .route("/search", searchRoute)
   .route("/chat", chatRoute);
 
 export const app = new Hono()

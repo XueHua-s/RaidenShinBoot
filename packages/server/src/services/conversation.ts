@@ -8,6 +8,7 @@ import {
 } from "@raiden/database";
 import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, summarizeForMemory } from "@raiden/shared/boot";
+import { maybeExecuteWebSearchForMessage } from "@raiden/shared/tools";
 
 export type ConversationInput = {
   telegramUserId: string;
@@ -52,11 +53,13 @@ export async function handleConversation(input: ConversationInput) {
     });
   }
   const recentMessages = await getRecentMessages(input.telegramUserId, 12);
+  const webSearch = await maybeExecuteWebSearchForMessage(input.content);
 
   const reply = await generateMakotoReply({
     userName: input.firstName ?? input.username ?? null,
     content: input.content,
     memories,
+    webSearch,
     history: recentMessages.map((message) => ({
       role: message.role as "user" | "assistant" | "system",
       content: message.content
@@ -90,6 +93,7 @@ export async function handleConversation(input: ConversationInput) {
   return {
     reply,
     memoryCount: memories.length,
+    webSearchResultCount: webSearch?.results.length ?? 0,
     userMessageId: userMessage.id,
     assistantMessageId: assistantMessage.id
   };

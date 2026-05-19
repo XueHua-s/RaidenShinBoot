@@ -29,6 +29,7 @@ pnpm dev:bot
 Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
 Set `BOOT_IMAGE_BASE_URL`, `BOOT_IMAGE_API_KEY`, and `BOOT_IMAGE_MODEL` to enable `/api/images` and the Telegram `/draw` command.
+Set `BOOT_SEARCH_PROVIDER` plus `BOOT_SEARCH_API_KEY` to enable the Boot `web_search` tool, `POST /api/search`, Telegram `/search`, and automatic search injection for explicit search requests in chat.
 On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
 
 `pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
@@ -37,6 +38,13 @@ Image generation is available through:
 
 - API: `POST /api/images` with `{ "prompt": "...", "size": "1024x1024", "n": 1 }`
 - Telegram: `/draw 稻妻夜色里的樱花与柔和雷光`
+
+Web search is available through:
+
+- API: `POST /api/search` with `{ "query": "...", "maxResults": 5 }`
+- API: `GET /api/search/tools` to inspect the Boot tool registry
+- Telegram: `/search Codex CLI 工具架构`
+- Chat auto-use: messages containing explicit search intent such as `联网搜索`, `查一下`, `最新`, or `新闻`
 
 ## AI Relay Configuration
 
@@ -47,6 +55,7 @@ The boot client supports separate OpenAI-compatible providers per capability:
 | Chat | `BOOT_CHAT_BASE_URL` or `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` or `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | Default chat model is `gpt-5.5`; the configured proxy requires streaming chat completions. |
 | Embedding | `BOOT_EMBEDDING_BASE_URL` or `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` or `BOOT_API_KEY` | `BOOT_EMBEDDING_MODEL` | Must return exactly 3072 dimensions because memories are stored as `halfvec(3072)`. |
 | Image | `BOOT_IMAGE_BASE_URL` or `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` or `BOOT_API_KEY` | `BOOT_IMAGE_MODEL` | Used by `POST /api/images` and Telegram `/draw`. Returns base64 images. |
+| Web search | `BOOT_SEARCH_BASE_URL` or provider default | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | Supported providers: `tavily`, `brave`, `serper`. Default is `disabled`. |
 
 Known working split configuration:
 
@@ -62,9 +71,20 @@ BOOT_EMBEDDING_API_KEY=
 BOOT_IMAGE_BASE_URL=https://api.burn.hair/v1
 BOOT_IMAGE_MODEL=gpt-image-1
 BOOT_IMAGE_API_KEY=
+
+BOOT_SEARCH_PROVIDER=disabled
+BOOT_SEARCH_API_KEY=
+BOOT_SEARCH_MAX_RESULTS=5
+BOOT_SEARCH_DEPTH=basic
 ```
 
 If one relay key can access every capability, set only `BOOT_API_KEY` and omit the capability-specific keys.
+
+Search provider defaults:
+
+- `tavily`: `https://api.tavily.com/search`, bearer token auth, uses `BOOT_SEARCH_DEPTH`.
+- `brave`: `https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` auth.
+- `serper`: `https://google.serper.dev/search`, `X-API-KEY` auth.
 
 ## Packages
 
@@ -73,6 +93,8 @@ If one relay key can access every capability, set only `BOOT_API_KEY` and omit t
 - `packages/server`: Hono API and typed routes
 - `packages/bot`: grammY Telegram bot
 - `packages/panel`: Refine admin panel
+
+Boot tool architecture notes live in `docs/boot-tools.md`. New user-facing bot capabilities should enter through `packages/shared/src/tools.ts` and then be exposed by API/bot adapters.
 
 ## Local Skills
 

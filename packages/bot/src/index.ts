@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { Bot, InputFile } from "grammy";
 import { generateMakotoImage } from "@raiden/shared/boot";
+import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
 import { getBotEnv } from "./env.js";
 import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
 
@@ -15,6 +16,7 @@ bot.api.setMyCommands([
   { command: "help", description: "查看可用指令" },
   { command: "memory", description: "查看最近的长期记忆" },
   { command: "recall", description: "按内容检索长期记忆" },
+  { command: "search", description: "联网搜索并返回来源" },
   { command: "draw", description: "生成一张雷电真氛围图片" }
 ]);
 
@@ -31,6 +33,7 @@ bot.command("help", async (ctx) => {
       "可以直接发消息与我交谈。",
       "/memory 查看最近保存的长期记忆。",
       "/recall 关键词 按语义检索与你有关的记忆。",
+      "/search 问题 联网搜索并返回来源。",
       "/draw 描述 生成一张雷电真氛围图片。"
     ].join("\n")
   );
@@ -87,6 +90,23 @@ bot.command("draw", async (ctx) => {
 
   await ctx.replyWithPhoto(new InputFile(Buffer.from(image.base64, "base64"), "raiden-makoto.png"), {
     caption: "给你，一点温柔的雷光。"
+  });
+});
+
+bot.command("search", async (ctx) => {
+  const query = ctx.match.trim();
+  if (!query) {
+    await ctx.reply("请在 /search 后写下要搜索的内容。");
+    return;
+  }
+
+  await ctx.replyWithChatAction("typing");
+  const result = await executeBootTool("web_search", {
+    query,
+    maxResults: 5
+  });
+  await ctx.reply(formatWebSearchResultsForTelegram(result), {
+    link_preview_options: { is_disabled: true }
   });
 });
 

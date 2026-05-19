@@ -32,6 +32,7 @@ const onePixelPngBase64 =
 type MockRelayState = {
   chatPrompts: string[];
   imagePrompts: string[];
+  searchQueries: string[];
   summaryPrompts: string[];
   memoryPrompts: string[];
   summaries: string[];
@@ -80,6 +81,8 @@ function createMockRelay(state: MockRelayState) {
           } else if (prompt.includes("长期记忆：\n1. 用户在 bot 路径喜欢被称作小雪，并喜欢团子牛奶")) {
             state.memoryPrompts.push(prompt);
             content = "小雪，我记得在 bot 路径里你喜欢团子牛奶，这也是我对你的清晰印象。";
+          } else if (prompt.includes("联网搜索结果")) {
+            content = "我已经查到资料，并会把来源与当下信息一起纳入判断。";
           }
         }
 
@@ -152,6 +155,28 @@ function createMockRelay(state: MockRelayState) {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/search") {
+        const body = JSON.parse(await readBody(req)) as { query?: string; max_results?: number };
+        state.searchQueries.push(body.query ?? "");
+        sendJson(res, 200, {
+          query: body.query ?? "",
+          results: [
+            {
+              title: "RaidenShinBoot 工具架构验证",
+              url: "https://example.com/raiden-tools",
+              content: "Boot 工具层使用注册表、输入校验和可配置搜索提供商完成闭环。",
+              published_date: "2026-05-20"
+            },
+            {
+              title: "Codex CLI Tool Router Pattern",
+              url: "https://github.com/openai/codex",
+              content: "工具规格、运行时注册表和延迟搜索工具可以分层管理。"
+            }
+          ].slice(0, body.max_results ?? 5)
+        });
+        return;
+      }
+
       sendJson(res, 404, { error: "mock route not found" });
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : "mock relay error" });
@@ -176,6 +201,7 @@ async function main() {
   const relayState: MockRelayState = {
     chatPrompts: [],
     imagePrompts: [],
+    searchQueries: [],
     summaryPrompts: [],
     memoryPrompts: [],
     summaries: []
@@ -195,6 +221,10 @@ async function main() {
   process.env.BOOT_CHAT_MODEL = "mock-chat";
   process.env.BOOT_EMBEDDING_MODEL = "mock-embedding";
   process.env.BOOT_IMAGE_MODEL = "mock-image";
+  process.env.BOOT_SEARCH_PROVIDER = "tavily";
+  process.env.BOOT_SEARCH_BASE_URL = `http://127.0.0.1:${port}`;
+  process.env.BOOT_SEARCH_API_KEY = "e2e-local-search-key";
+  process.env.BOOT_SEARCH_MAX_RESULTS = "5";
 
   try {
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
@@ -296,6 +326,57 @@ async function main() {
       throw new Error("Expected both API and bot prompts to include retrieved long-term memory");
     }
 
+    const toolsResponse = await app.request("/api/search/tools");
+    if (!toolsResponse.ok) {
+      throw new Error(`Search tools route failed with ${toolsResponse.status}: ${await toolsResponse.text()}`);
+    }
+    const toolsPayload = (await toolsResponse.json()) as { tools?: Array<{ name?: string }> };
+    if (!toolsPayload.tools?.some((tool) => tool.name === "web_search")) {
+      throw new Error("Boot tool registry did not expose web_search");
+    }
+
+    const searchResponse = await app.request("/api/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: "RaidenShinBoot 工具架构",
+        maxResults: 2
+      })
+    });
+    if (!searchResponse.ok) {
+      throw new Error(`Search route failed with ${searchResponse.status}: ${await searchResponse.text()}`);
+    }
+    const searchPayload = (await searchResponse.json()) as {
+      provider?: string;
+      results?: Array<{ title?: string; url?: string; snippet?: string }>;
+    };
+    if (searchPayload.provider !== "tavily" || searchPayload.results?.length !== 2) {
+      throw new Error("Search route returned an invalid payload");
+    }
+    if (!searchPayload.results[0]?.url?.startsWith("https://example.com/")) {
+      throw new Error("Search route did not normalize provider results");
+    }
+
+    const searchChat = await app.request("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        username: "e2e_user",
+        content: "请联网搜索 RaidenShinBoot 工具架构，并结合来源回答。"
+      })
+    });
+    if (!searchChat.ok) {
+      throw new Error(`Search-enabled chat route failed with ${searchChat.status}: ${await searchChat.text()}`);
+    }
+    const searchChatPayload = (await searchChat.json()) as { reply?: string; webSearchResultCount?: number };
+    if (!searchChatPayload.reply || (searchChatPayload.webSearchResultCount ?? 0) < 1) {
+      throw new Error("Search-enabled chat did not execute web_search");
+    }
+    if (!relayState.chatPrompts.some((prompt) => prompt.includes("联网搜索结果") && prompt.includes("raiden-tools"))) {
+      throw new Error("Search-enabled chat did not inject web results into the Makoto prompt");
+    }
+
     const imageResponse = await app.request("/api/images", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -336,6 +417,7 @@ async function main() {
           imageBase64Length: generatedImage.base64.length,
           memoryPromptCount: relayState.memoryPrompts.length,
           imagePromptCount: relayState.imagePrompts.length,
+          searchQueryCount: relayState.searchQueries.length,
           summaryCount: relayState.summaries.length,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
