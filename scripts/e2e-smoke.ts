@@ -30,12 +30,40 @@ function createMockRelay() {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         const body = JSON.parse(await readBody(req)) as {
           model?: string;
+          stream?: boolean;
           messages?: Array<{ role: string; content: string }>;
         };
         const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
         const content = system.includes("长期记忆提炼器")
           ? "用户正在进行 RaidenShinBoot 本地端到端验证。"
           : "你好，旅行者。我是真，这次端到端验证已经安稳地接入了雷光。";
+        if (body.stream) {
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive"
+          });
+          res.write(
+            `data: ${JSON.stringify({
+              id: "chatcmpl-e2e",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: body.model ?? "mock-chat",
+              choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }]
+            })}\n\n`
+          );
+          res.write(
+            `data: ${JSON.stringify({
+              id: "chatcmpl-e2e",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: body.model ?? "mock-chat",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+            })}\n\n`
+          );
+          res.end("data: [DONE]\n\n");
+          return;
+        }
 
         sendJson(res, 200, {
           id: "chatcmpl-e2e",

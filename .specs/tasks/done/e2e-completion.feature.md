@@ -36,4 +36,4 @@ Ensure the RaidenShinBoot monorepo can run through a practical end-to-end valida
 - Applied Drizzle migrations against local PostgreSQL and verified `vector`, `halfvec(3072)`, and HNSW index state.
 - Added `pnpm test:e2e` to exercise Hono `/api/chat`, the bot conversation core, AI SDK chat/embedding through a local OpenAI-compatible mock relay, and long-term memory persistence.
 - Verified local API, panel dev entry, CORS for dynamic local Vite ports, build, type checks, migration generation, migration execution, and E2E smoke.
-- Probed the configured external relay with the provided key through direct and local proxy routes; both chat and embedding requests timed out during TLS setup before reaching HTTP authentication.
+- Retested the external relay through `https://proxy.xhblog.top:3000/v1`; `gpt-5.5` chat works when `stream: true`, while `text-embedding-3-large` is not available on that proxy.
