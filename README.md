@@ -82,7 +82,7 @@ If one relay key can access every capability, set only `BOOT_API_KEY` and omit t
 
 Search provider defaults:
 
-- `tavily`: `https://api.tavily.com/search`, bearer token auth, uses `BOOT_SEARCH_DEPTH`.
+- `tavily`: `https://api.tavily.com/search`, bearer token auth, uses `BOOT_SEARCH_DEPTH` (`basic` or `advanced`).
 - `brave`: `https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` auth.
 - `serper`: `https://google.serper.dev/search`, `X-API-KEY` auth.
 

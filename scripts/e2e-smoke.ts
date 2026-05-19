@@ -357,6 +357,21 @@ async function main() {
       throw new Error("Search route did not normalize provider results");
     }
 
+    const originalSearchProvider = process.env.BOOT_SEARCH_PROVIDER;
+    process.env.BOOT_SEARCH_PROVIDER = "disabled";
+    const disabledSearchResponse = await app.request("/api/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: "should return a configuration error",
+        maxResults: 1
+      })
+    });
+    if (disabledSearchResponse.status !== 503) {
+      throw new Error(`Disabled search route should return 503, got ${disabledSearchResponse.status}`);
+    }
+    process.env.BOOT_SEARCH_PROVIDER = originalSearchProvider;
+
     const searchChat = await app.request("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -376,6 +391,30 @@ async function main() {
     if (!relayState.chatPrompts.some((prompt) => prompt.includes("联网搜索结果") && prompt.includes("raiden-tools"))) {
       throw new Error("Search-enabled chat did not inject web results into the Makoto prompt");
     }
+
+    const searchQueryCountBeforeFailure = relayState.searchQueries.length;
+    const originalSearchApiKey = process.env.BOOT_SEARCH_API_KEY;
+    process.env.BOOT_SEARCH_API_KEY = "";
+    const failedSearchChat = await app.request("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        username: "e2e_user",
+        content: "请联网搜索 这个配置不可用时也不要中断聊天。"
+      })
+    });
+    if (!failedSearchChat.ok) {
+      throw new Error(`Search failure fallback chat failed with ${failedSearchChat.status}: ${await failedSearchChat.text()}`);
+    }
+    const failedSearchChatPayload = (await failedSearchChat.json()) as { reply?: string; webSearchStatus?: string };
+    if (!failedSearchChatPayload.reply || failedSearchChatPayload.webSearchStatus !== "failed") {
+      throw new Error("Search failure fallback chat did not report a failed web search state");
+    }
+    if (relayState.searchQueries.length !== searchQueryCountBeforeFailure) {
+      throw new Error("Search failure fallback should not call the provider when the key is missing");
+    }
+    process.env.BOOT_SEARCH_API_KEY = originalSearchApiKey;
 
     const imageResponse = await app.request("/api/images", {
       method: "POST",
@@ -418,6 +457,8 @@ async function main() {
           memoryPromptCount: relayState.memoryPrompts.length,
           imagePromptCount: relayState.imagePrompts.length,
           searchQueryCount: relayState.searchQueries.length,
+          disabledSearchStatus: disabledSearchResponse.status,
+          failedSearchChatStatus: failedSearchChatPayload.webSearchStatus,
           summaryCount: relayState.summaries.length,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },

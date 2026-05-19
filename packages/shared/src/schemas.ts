@@ -42,7 +42,8 @@ export const chatRequestSchema = z.object({
 export const chatResponseSchema = z.object({
   reply: z.string(),
   memoryCount: z.number().int().min(0),
-  webSearchResultCount: z.number().int().min(0).default(0)
+  webSearchResultCount: z.number().int().min(0).default(0),
+  webSearchStatus: z.enum(["skipped", "completed", "failed"]).default("skipped")
 });
 
 export const imageGenerationRequestSchema = z.object({

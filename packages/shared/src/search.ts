@@ -9,11 +9,29 @@ const searchEnvSchema = z.object({
   BOOT_SEARCH_API_KEY: optionalString,
   BOOT_SEARCH_BASE_URL: optionalUrl,
   BOOT_SEARCH_MAX_RESULTS: z.coerce.number().int().min(1).max(10).default(5),
-  BOOT_SEARCH_DEPTH: z.enum(["ultra-fast", "fast", "basic", "advanced"]).default("basic")
+  BOOT_SEARCH_DEPTH: z.enum(["basic", "advanced"]).default("basic")
 });
 
 export type BootSearchConfig = z.infer<typeof searchEnvSchema>;
 export type BootSearchProvider = BootSearchConfig["BOOT_SEARCH_PROVIDER"];
+export type BootSearchErrorCode =
+  | "search_disabled"
+  | "search_missing_api_key"
+  | "search_provider_failed"
+  | "search_provider_bad_json"
+  | "search_configuration_invalid";
+
+export class BootSearchError extends Error {
+  readonly code: BootSearchErrorCode;
+  readonly statusCode: number;
+
+  constructor(code: BootSearchErrorCode, message: string, statusCode: number) {
+    super(message);
+    this.name = "BootSearchError";
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
 
 export type SearchWebOptions = {
   config?: BootSearchConfig;
@@ -21,7 +39,12 @@ export type SearchWebOptions = {
 };
 
 export function getBootSearchConfig(env: NodeJS.ProcessEnv = process.env): BootSearchConfig {
-  return searchEnvSchema.parse(env);
+  const result = searchEnvSchema.safeParse(env);
+  if (!result.success) {
+    throw new BootSearchError("search_configuration_invalid", result.error.issues[0]?.message ?? "Invalid search configuration.", 500);
+  }
+
+  return result.data;
 }
 
 export function isWebSearchConfigured(env: NodeJS.ProcessEnv = process.env) {
@@ -34,11 +57,15 @@ export async function searchWeb(input: WebSearchRequest, options: SearchWebOptio
   const provider = config.BOOT_SEARCH_PROVIDER;
 
   if (provider === "disabled") {
-    throw new Error("BOOT_SEARCH_PROVIDER is disabled; set it to tavily, brave, or serper to enable web search.");
+    throw new BootSearchError(
+      "search_disabled",
+      "BOOT_SEARCH_PROVIDER is disabled; set it to tavily, brave, or serper to enable web search.",
+      503
+    );
   }
 
   if (!config.BOOT_SEARCH_API_KEY) {
-    throw new Error("BOOT_SEARCH_API_KEY is required when BOOT_SEARCH_PROVIDER is enabled.");
+    throw new BootSearchError("search_missing_api_key", "BOOT_SEARCH_API_KEY is required when BOOT_SEARCH_PROVIDER is enabled.", 503);
   }
 
   const fetchImpl = options.fetch ?? fetch;
@@ -140,14 +167,26 @@ async function fetchJson(fetchImpl: typeof fetch, url: URL, init: RequestInit) {
   const response = await fetchImpl(url, init);
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`Web search request failed with ${response.status}: ${text.slice(0, 300)}`);
+    throw new BootSearchError("search_provider_failed", `Web search provider failed with HTTP ${response.status}.`, 502);
   }
 
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    throw new Error("Web search provider returned non-JSON response.");
+    throw new BootSearchError("search_provider_bad_json", "Web search provider returned non-JSON response.", 502);
   }
+}
+
+export function getBootSearchErrorStatus(error: unknown) {
+  return error instanceof BootSearchError ? error.statusCode : 500;
+}
+
+export function formatBootSearchError(error: unknown) {
+  if (error instanceof BootSearchError) {
+    return error.message;
+  }
+
+  return error instanceof Error ? error.message : "Web search failed.";
 }
 
 function joinUrl(baseUrl: string, path: string) {

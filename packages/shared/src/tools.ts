@@ -1,5 +1,5 @@
 import { webSearchRequestSchema, webSearchResponseSchema, type WebSearchRequest, type WebSearchResponse } from "./schemas.js";
-import { isWebSearchConfigured, searchWeb, type BootSearchConfig, type SearchWebOptions } from "./search.js";
+import { formatBootSearchError, searchWeb, type BootSearchConfig, type SearchWebOptions } from "./search.js";
 
 export type BootToolExposure = "direct" | "deferred";
 
@@ -16,6 +16,11 @@ export type BootToolDefinition<Input, Output> = {
   outputSchema: { parse: (input: unknown) => Output };
   execute: (input: Input, context?: BootToolContext) => Promise<Output>;
 };
+
+export type WebSearchForMessageResult =
+  | { status: "skipped"; response: null; error: null }
+  | { status: "completed"; response: WebSearchResponse; error: null }
+  | { status: "failed"; response: null; error: string };
 
 const webSearchTool = {
   name: "web_search",
@@ -105,23 +110,29 @@ export function shouldUseWebSearchForMessage(content: string) {
 }
 
 export async function maybeExecuteWebSearchForMessage(content: string, context?: BootToolContext) {
+  return (await resolveWebSearchForMessage(content, context)).response;
+}
+
+export async function resolveWebSearchForMessage(content: string, context?: BootToolContext): Promise<WebSearchForMessageResult> {
   if (!shouldUseWebSearchForMessage(content)) {
-    return null;
+    return { status: "skipped", response: null, error: null };
   }
 
-  const configured = context?.searchConfig
-    ? context.searchConfig.BOOT_SEARCH_PROVIDER !== "disabled" && Boolean(context.searchConfig.BOOT_SEARCH_API_KEY)
-    : isWebSearchConfigured();
-  if (!configured) {
-    return null;
+  try {
+    const response = await executeBootTool(
+      "web_search",
+      {
+        query: content,
+        maxResults: 4
+      },
+      context
+    );
+    return { status: "completed", response, error: null };
+  } catch (error) {
+    return {
+      status: "failed",
+      response: null,
+      error: formatBootSearchError(error)
+    };
   }
-
-  return executeBootTool(
-    "web_search",
-    {
-      query: content,
-      maxResults: 4
-    },
-    context
-  );
 }

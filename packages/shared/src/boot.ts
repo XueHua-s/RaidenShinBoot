@@ -103,11 +103,16 @@ export async function generateMakotoReply(input: {
   history?: ChatHistoryItem[];
   memories?: MemoryHit[];
   webSearch?: WebSearchResponse | null;
+  webSearchError?: string | null;
   config?: BootConfig;
 }): Promise<string> {
   const config = input.config ?? getBootConfig();
   const memoryContext = buildMemoryContext(input.memories ?? []);
-  const webSearchContext = input.webSearch ? formatWebSearchResultsForPrompt(input.webSearch) : "本轮没有使用联网搜索。";
+  const webSearchContext = input.webSearch
+    ? formatWebSearchResultsForPrompt(input.webSearch)
+    : input.webSearchError
+      ? `联网搜索尝试失败：${input.webSearchError}\n请坦诚说明无法使用实时来源，不要编造不存在的搜索结果。`
+      : "本轮没有使用联网搜索。";
   const historyText = (input.history ?? [])
     .slice(-12)
     .map((item) => `${item.role}: ${item.content}`)

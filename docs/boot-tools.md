@@ -30,6 +30,8 @@ Default provider is `disabled`, so local development and tests do not accidental
 - Telegram command: `/search <query>`
 - Automatic chat search: explicit search-intent messages inject web results into the Makoto prompt
 
+Chat search failures are converted into prompt context rather than thrown through the conversation path. Direct tool users such as `POST /api/search` and `/search` still receive a clear configuration/provider error.
+
 ## Adding Another Tool
 
 1. Add request/response schemas in `packages/shared/src/schemas.ts`.

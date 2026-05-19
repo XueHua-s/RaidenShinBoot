@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { Bot, InputFile } from "grammy";
 import { generateMakotoImage } from "@raiden/shared/boot";
+import { formatBootSearchError } from "@raiden/shared/search";
 import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
 import { getBotEnv } from "./env.js";
 import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
@@ -101,13 +102,17 @@ bot.command("search", async (ctx) => {
   }
 
   await ctx.replyWithChatAction("typing");
-  const result = await executeBootTool("web_search", {
-    query,
-    maxResults: 5
-  });
-  await ctx.reply(formatWebSearchResultsForTelegram(result), {
-    link_preview_options: { is_disabled: true }
-  });
+  try {
+    const result = await executeBootTool("web_search", {
+      query,
+      maxResults: 5
+    });
+    await ctx.reply(formatWebSearchResultsForTelegram(result), {
+      link_preview_options: { is_disabled: true }
+    });
+  } catch (error) {
+    await ctx.reply(`联网搜索暂不可用：${formatBootSearchError(error)}`);
+  }
 });
 
 bot.on("message:text", async (ctx) => {

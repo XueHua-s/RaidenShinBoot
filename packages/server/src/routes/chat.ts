@@ -14,6 +14,7 @@ export const chatRoute = new Hono().post("/", zValidator("json", chatRequestSche
   return c.json({
     reply: result.reply,
     memoryCount: result.memoryCount,
-    webSearchResultCount: result.webSearchResultCount
+    webSearchResultCount: result.webSearchResultCount,
+    webSearchStatus: result.webSearchStatus
   });
 });
