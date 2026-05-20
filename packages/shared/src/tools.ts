@@ -283,9 +283,15 @@ function budgetWebSearchResponse(output: WebSearchResponse, budgetChars: number)
   while (serializedLength > budgetChars && budgeted.results.length > 0) {
     const overBy = serializedLength - budgetChars;
     const lastResult = budgeted.results[budgeted.results.length - 1];
-    if (lastResult?.snippet && lastResult.snippet.length > 80) {
-      const targetLength = Math.max(80, lastResult.snippet.length - overBy - 3);
-      lastResult.snippet = `${lastResult.snippet.slice(0, targetLength)}...`;
+    if (lastResult?.snippet) {
+      const targetLength = Math.max(0, lastResult.snippet.length - overBy - 3);
+      if (targetLength <= 0) {
+        delete lastResult.snippet;
+      } else if (targetLength < lastResult.snippet.length) {
+        lastResult.snippet = `${lastResult.snippet.slice(0, targetLength)}...`;
+      } else {
+        budgeted.results.pop();
+      }
     } else {
       budgeted.results.pop();
     }
