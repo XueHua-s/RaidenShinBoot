@@ -1,0 +1,3 @@
+DROP INDEX "telegram_command_permissions_scope_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "telegram_command_permissions_chat_command_idx" ON "telegram_command_permissions" USING btree ("chat_id","command") WHERE "telegram_command_permissions"."chat_id" is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "telegram_command_permissions_global_command_idx" ON "telegram_command_permissions" USING btree ("command") WHERE "telegram_command_permissions"."chat_id" is null;

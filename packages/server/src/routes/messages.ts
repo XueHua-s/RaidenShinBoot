@@ -3,12 +3,14 @@ import { countMessages, listMessages } from "@raiden/database";
 import { paginationQuerySchema } from "@raiden/shared";
 import { Hono } from "hono";
 import { z } from "zod";
+import { requirePermission, type AuthVariables } from "../auth.js";
 
 const messageQuerySchema = paginationQuerySchema.extend({
   telegramUserId: z.string().optional()
 });
 
-export const messagesRoute = new Hono().get("/", zValidator("query", messageQuerySchema), async (c) => {
+export const messagesRoute = new Hono<{ Variables: AuthVariables }>().get("/", zValidator("query", messageQuerySchema), async (c) => {
+  requirePermission(c, "conversation:read");
   const query = c.req.valid("query");
   const [data, total] = await Promise.all([
     listMessages(query),
@@ -17,4 +19,3 @@ export const messagesRoute = new Hono().get("/", zValidator("query", messageQuer
 
   return c.json({ data, total });
 });
-

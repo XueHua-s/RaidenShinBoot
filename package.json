@@ -10,6 +10,7 @@
     "dev:server": "pnpm --filter @raiden/server dev",
     "dev:bot": "pnpm --filter @raiden/bot dev",
     "dev:panel": "pnpm --filter @raiden/panel dev",
+    "admin:bootstrap": "pnpm --filter @raiden/server admin:bootstrap",
     "db:generate": "pnpm --filter @raiden/database db:generate",
     "db:migrate": "pnpm --filter @raiden/database db:migrate",
     "db:studio": "pnpm --filter @raiden/database db:studio",

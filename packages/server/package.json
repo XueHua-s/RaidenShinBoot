@@ -15,12 +15,18 @@
       "source": "./src/app.ts",
       "types": "./dist/app.d.mts",
       "import": "./dist/app.mjs"
+    },
+    "./auth": {
+      "source": "./src/auth.ts",
+      "types": "./dist/auth.d.mts",
+      "import": "./dist/auth.mjs"
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/app.ts --format esm --dts",
+    "build": "tsdown src/index.ts src/app.ts src/auth.ts src/scripts/bootstrap-admin.ts --format esm --dts",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx --conditions=source src/index.ts",
+    "admin:bootstrap": "tsx --conditions=source src/scripts/bootstrap-admin.ts",
     "start": "node dist/index.mjs"
   },
   "dependencies": {

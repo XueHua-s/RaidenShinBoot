@@ -1,11 +1,19 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import { logger } from "hono/logger";
+import { authMiddleware, type AuthVariables } from "./auth.js";
+import { adminSessionsRoute } from "./routes/admin-sessions.js";
+import { adminUsersRoute } from "./routes/admin-users.js";
+import { auditLogsRoute } from "./routes/audit-logs.js";
+import { authRoute } from "./routes/auth.js";
 import { chatRoute } from "./routes/chat.js";
 import { imagesRoute } from "./routes/images.js";
 import { memoriesRoute } from "./routes/memories.js";
 import { messagesRoute } from "./routes/messages.js";
 import { searchRoute } from "./routes/search.js";
+import { healthStatusPayload, systemRoute } from "./routes/system.js";
+import { telegramRoute } from "./routes/telegram.js";
 import { usersRoute } from "./routes/users.js";
 
 function corsOrigin(origin: string) {
@@ -16,19 +24,15 @@ function corsOrigin(origin: string) {
   return null;
 }
 
-const api = new Hono()
-  .get("/health", (c) =>
-    c.json({
-      ok: true,
-      service: "raiden-shin-server",
-      databaseConfigured: Boolean(process.env.DATABASE_URL),
-      bootBaseUrl: process.env.BOOT_BASE_URL ?? "https://proxy.xhblog.top:3000/v1",
-      bootChatBaseUrl: process.env.BOOT_CHAT_BASE_URL ?? process.env.BOOT_BASE_URL ?? "https://proxy.xhblog.top:3000/v1",
-      bootEmbeddingBaseUrl: process.env.BOOT_EMBEDDING_BASE_URL ?? process.env.BOOT_BASE_URL ?? null,
-      bootImageBaseUrl: process.env.BOOT_IMAGE_BASE_URL ?? process.env.BOOT_BASE_URL ?? null,
-      bootSearchProvider: process.env.BOOT_SEARCH_PROVIDER ?? "disabled"
-    })
-  )
+const api = new Hono<{ Variables: AuthVariables }>()
+  .get("/health", (c) => c.json(healthStatusPayload()))
+  .route("/auth", authRoute)
+  .use("*", authMiddleware)
+  .route("/admin-users", adminUsersRoute)
+  .route("/admin-sessions", adminSessionsRoute)
+  .route("/audit-logs", auditLogsRoute)
+  .route("/telegram", telegramRoute)
+  .route("/system", systemRoute)
   .route("/users", usersRoute)
   .route("/messages", messagesRoute)
   .route("/memories", memoriesRoute)
@@ -42,17 +46,22 @@ export const app = new Hono()
     "*",
     cors({
       origin: corsOrigin,
+      credentials: true,
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Authorization"]
+      allowHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
     })
   )
   .route("/api", api)
   .notFound((c) => c.json({ error: "Not found" }, 404))
   .onError((error, c) => {
+    if (error instanceof HTTPException) {
+      return c.json({ error: error.message }, error.status);
+    }
+
     console.error(error);
     return c.json(
       {
-        error: error instanceof Error ? error.message : "Internal server error"
+        error: "Internal server error"
       },
       500
     );

@@ -20,6 +20,7 @@ cp .env.example .env
 docker compose up -d postgres
 pnpm db:generate
 pnpm db:migrate
+ADMIN_USERNAME=owner ADMIN_PASSWORD='replace-with-a-long-password' pnpm admin:bootstrap
 pnpm test:e2e
 pnpm dev:server
 pnpm dev:panel
@@ -27,10 +28,24 @@ pnpm dev:bot
 ```
 
 Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
+Create the first admin with `pnpm admin:bootstrap`; the command requires `ADMIN_USERNAME` and an `ADMIN_PASSWORD` of at least 12 characters and never creates a default production account.
+Set `BOOT_SETTINGS_ENCRYPTION_KEY` before saving relay keys in the admin System page; model names and base URLs can be managed without it, but secrets are rejected unless encrypted storage is ready.
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
 Set `BOOT_IMAGE_BASE_URL`, `BOOT_IMAGE_API_KEY`, and `BOOT_IMAGE_MODEL` to enable `/api/images` and the Telegram `/draw` command.
 Set `BOOT_SEARCH_PROVIDER` plus `BOOT_SEARCH_API_KEY` to enable the Boot `web_search` tool, `POST /api/search`, Telegram `/search`, and automatic search injection for explicit search requests in chat.
 On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
+
+To run the containerized app stack after filling `.env`:
+
+```bash
+docker compose --profile app up --build
+```
+
+The `bot` container is isolated behind a profile so local stacks can run without a Telegram token:
+
+```bash
+docker compose --profile app --profile bot up --build
+```
 
 `pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
 
@@ -57,6 +72,10 @@ The boot client supports separate OpenAI-compatible providers per capability:
 | Image | `BOOT_IMAGE_BASE_URL` or `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` or `BOOT_API_KEY` | `BOOT_IMAGE_MODEL` | Used by `POST /api/images` and Telegram `/draw`. Returns base64 images. |
 | Web search | `BOOT_SEARCH_BASE_URL` or provider default | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | Supported providers: `tavily`, `brave`, `serper`. Default is `disabled`. |
 
+The admin panel's System page can persist these values into PostgreSQL `runtime_settings`. Runtime settings take precedence over `.env`, are audited, and are read by both the Hono API and the grammY bot on the next request. Secret values are write-only and stored with AES-256-GCM when `BOOT_SETTINGS_ENCRYPTION_KEY` is set.
+
+For `new-api`, choose the `new-api` preset in System and point `BOOT_BASE_URL` to the gateway's OpenAI-compatible `/v1` endpoint, for example `https://new-api.example.com/v1`. Use the model names exposed by that gateway for chat/image, and keep the embedding model mapped to a 3072-dimensional provider for memory.
+
 Known working split configuration:
 
 ```env
@@ -76,6 +95,7 @@ BOOT_SEARCH_PROVIDER=disabled
 BOOT_SEARCH_API_KEY=
 BOOT_SEARCH_MAX_RESULTS=5
 BOOT_SEARCH_DEPTH=basic
+BOOT_SETTINGS_ENCRYPTION_KEY=
 ```
 
 If one relay key can access every capability, set only `BOOT_API_KEY` and omit the capability-specific keys.

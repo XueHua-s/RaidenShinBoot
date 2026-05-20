@@ -1,5 +1,14 @@
-import { closeDatabase, getSqlClient, listMemories } from "@raiden/database";
+import {
+  closeDatabase,
+  createAdminUser,
+  deleteRuntimeSetting,
+  getSqlClient,
+  listMemories,
+  resolveTelegramChatAccess,
+  updateTelegramChat
+} from "@raiden/database";
 import { app } from "@raiden/server/app";
+import { hashPassword } from "@raiden/server/auth";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
@@ -18,8 +27,30 @@ async function main() {
   const apiTelegramUserId = `e2e-api-${Date.now()}`;
   const botUserNumericId = Date.now() % 1_000_000_000;
   const botTelegramUserId = String(botUserNumericId);
+  const adminUsername = `e2e-admin-${Date.now()}`;
+  const adminPassword = "e2e-admin-password-123";
   const sql = getSqlClient();
+  const runtimeSettingKeys = [
+    "BOOT_GATEWAY_PRESET",
+    "BOOT_BASE_URL",
+    "BOOT_CHAT_BASE_URL",
+    "BOOT_EMBEDDING_BASE_URL",
+    "BOOT_IMAGE_BASE_URL",
+    "BOOT_SEARCH_BASE_URL",
+    "BOOT_API_KEY",
+    "BOOT_CHAT_API_KEY",
+    "BOOT_EMBEDDING_API_KEY",
+    "BOOT_IMAGE_API_KEY",
+    "BOOT_SEARCH_API_KEY",
+    "BOOT_CHAT_MODEL",
+    "BOOT_EMBEDDING_MODEL",
+    "BOOT_IMAGE_MODEL",
+    "BOOT_SEARCH_PROVIDER",
+    "BOOT_SEARCH_MAX_RESULTS",
+    "BOOT_SEARCH_DEPTH"
+  ];
 
+  process.env.BOOT_SETTINGS_ENCRYPTION_KEY = "e2e-runtime-settings-secret";
   process.env.BOOT_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.BOOT_CHAT_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.BOOT_EMBEDDING_BASE_URL = `http://127.0.0.1:${port}/v1`;
@@ -34,14 +65,111 @@ async function main() {
   process.env.BOOT_SEARCH_MAX_RESULTS = "5";
 
   try {
+    await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from admin_users where username = ${adminUsername}`;
+
+    await createAdminUser({
+      username: adminUsername,
+      displayName: "E2E Admin",
+      passwordHash: await hashPassword(adminPassword),
+      role: "super_admin",
+      status: "active"
+    });
+
+    const loginResponse = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: adminUsername,
+        password: adminPassword
+      })
+    });
+    if (!loginResponse.ok) {
+      throw new Error(`Admin login failed with ${loginResponse.status}: ${await loginResponse.text()}`);
+    }
+    const sessionCookie = loginResponse.headers.get("set-cookie")?.split(";")[0];
+    const loginPayload = (await loginResponse.json()) as { csrfToken?: string };
+    if (!sessionCookie || !loginPayload.csrfToken) {
+      throw new Error("Admin login did not return session cookie and CSRF token");
+    }
+
+    const authedRequest = (path: string, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set("cookie", sessionCookie);
+      if (init.method && !["GET", "HEAD", "OPTIONS"].includes(init.method.toUpperCase())) {
+        headers.set("x-csrf-token", loginPayload.csrfToken ?? "");
+      }
+
+      return app.request(path, {
+        ...init,
+        headers
+      });
+    };
+
+    const patchRuntimeSettings = async (patch: Record<string, unknown>) => {
+      const response = await authedRequest("/api/system/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      if (!response.ok) {
+        throw new Error(`Runtime settings patch failed with ${response.status}: ${await response.text()}`);
+      }
+
+      return response.json() as Promise<{
+        data: {
+          bootBaseUrl?: string;
+          bootSearchProvider?: string;
+          secrets?: Record<string, boolean>;
+        };
+      }>;
+    };
+    const putCommandPermission = async (patch: { chatId: string | null; command: string; enabled: boolean }) => {
+      const response = await authedRequest("/api/telegram/command-permissions", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      if (!response.ok) {
+        throw new Error(`Telegram command permission upsert failed with ${response.status}: ${await response.text()}`);
+      }
+
+      return response.json();
+    };
 
     const health = await app.request("/api/health");
     if (!health.ok) {
       throw new Error(`Health check failed with ${health.status}`);
     }
 
-    const firstChat = await app.request("/api/chat", {
+    const runtimeSettings = await patchRuntimeSettings({
+      gatewayPreset: "new_api",
+      bootBaseUrl: `http://127.0.0.1:${port}/v1`,
+      bootChatBaseUrl: `http://127.0.0.1:${port}/v1`,
+      bootEmbeddingBaseUrl: `http://127.0.0.1:${port}/v1`,
+      bootImageBaseUrl: `http://127.0.0.1:${port}/v1`,
+      bootChatModel: "mock-chat",
+      bootEmbeddingModel: "mock-embedding",
+      bootImageModel: "mock-image",
+      bootSearchProvider: "tavily",
+      bootSearchBaseUrl: `http://127.0.0.1:${port}`,
+      bootSearchMaxResults: 5,
+      bootSearchDepth: "basic",
+      bootApiKey: "e2e-local-key",
+      bootSearchApiKey: "e2e-local-search-key"
+    });
+    if (
+      runtimeSettings.data.bootBaseUrl !== `http://127.0.0.1:${port}/v1` ||
+      runtimeSettings.data.bootSearchProvider !== "tavily" ||
+      !runtimeSettings.data.secrets?.bootApiKey ||
+      !runtimeSettings.data.secrets.bootSearchApiKey
+    ) {
+      throw new Error("Runtime settings did not persist new-api relay and secret status");
+    }
+
+    const firstChat = await authedRequest("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -65,7 +193,7 @@ async function main() {
       throw new Error("Expected API memory to preserve the user's nickname and preference");
     }
 
-    const secondChat = await app.request("/api/chat", {
+    const secondChat = await authedRequest("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -133,7 +261,47 @@ async function main() {
       throw new Error("Expected both API and bot prompts to include retrieved long-term memory");
     }
 
-    const toolsResponse = await app.request("/api/search/tools");
+    const pendingGroupAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (pendingGroupAccess.allowed || pendingGroupAccess.chat.status !== "pending") {
+      throw new Error("Unknown Telegram group should start as pending and blocked");
+    }
+    await updateTelegramChat("-1001234567890", { status: "approved" });
+    const approvedGroupAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (!approvedGroupAccess.allowed) {
+      throw new Error("Approved Telegram group should be allowed");
+    }
+    await putCommandPermission({ chatId: null, command: "start", enabled: false });
+    const globallyBlockedCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (globallyBlockedCommandAccess.allowed || globallyBlockedCommandAccess.reason !== "command_disabled") {
+      throw new Error("Global Telegram command permission should block the command");
+    }
+    await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true });
+    const scopedCommandOverrideAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (!scopedCommandOverrideAccess.allowed) {
+      throw new Error("Chat-scoped Telegram command permission should override the global rule");
+    }
+
+    const toolsResponse = await authedRequest("/api/search/tools");
     if (!toolsResponse.ok) {
       throw new Error(`Search tools route failed with ${toolsResponse.status}: ${await toolsResponse.text()}`);
     }
@@ -142,7 +310,7 @@ async function main() {
       throw new Error("Boot tool registry did not expose web_search");
     }
 
-    const searchResponse = await app.request("/api/search", {
+    const searchResponse = await authedRequest("/api/search", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -164,9 +332,8 @@ async function main() {
       throw new Error("Search route did not normalize provider results");
     }
 
-    const originalSearchProvider = process.env.BOOT_SEARCH_PROVIDER;
-    process.env.BOOT_SEARCH_PROVIDER = "disabled";
-    const disabledSearchResponse = await app.request("/api/search", {
+    await patchRuntimeSettings({ bootSearchProvider: "disabled" });
+    const disabledSearchResponse = await authedRequest("/api/search", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -177,9 +344,9 @@ async function main() {
     if (disabledSearchResponse.status !== 503) {
       throw new Error(`Disabled search route should return 503, got ${disabledSearchResponse.status}`);
     }
-    process.env.BOOT_SEARCH_PROVIDER = originalSearchProvider;
+    await patchRuntimeSettings({ bootSearchProvider: "tavily" });
 
-    const searchChat = await app.request("/api/chat", {
+    const searchChat = await authedRequest("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -202,7 +369,8 @@ async function main() {
     const searchQueryCountBeforeFailure = relayState.searchQueries.length;
     const originalSearchApiKey = process.env.BOOT_SEARCH_API_KEY;
     process.env.BOOT_SEARCH_API_KEY = "";
-    const failedSearchChat = await app.request("/api/chat", {
+    await patchRuntimeSettings({ bootSearchApiKey: null });
+    const failedSearchChat = await authedRequest("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -222,8 +390,9 @@ async function main() {
       throw new Error("Search failure fallback should not call the provider when the key is missing");
     }
     process.env.BOOT_SEARCH_API_KEY = originalSearchApiKey;
+    await patchRuntimeSettings({ bootSearchApiKey: "e2e-local-search-key" });
 
-    const imageResponse = await app.request("/api/images", {
+    const imageResponse = await authedRequest("/api/images", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -267,6 +436,10 @@ async function main() {
           disabledSearchStatus: disabledSearchResponse.status,
           failedSearchChatStatus: failedSearchChatPayload.webSearchStatus,
           summaryCount: relayState.summaries.length,
+          pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
+          approvedGroupAllowed: approvedGroupAccess.allowed,
+          globalCommandBlocked: !globallyBlockedCommandAccess.allowed,
+          scopedCommandOverrideAllowed: scopedCommandOverrideAccess.allowed,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
         null,
@@ -275,6 +448,10 @@ async function main() {
     );
   } finally {
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
+    await sql`delete from admin_users where username = ${adminUsername}`;
+    await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
     await closeDatabase();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

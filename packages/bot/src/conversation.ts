@@ -11,6 +11,7 @@ import {
 import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, summarizeForMemory } from "@raiden/shared/boot";
 import { resolveWebSearchForMessage } from "@raiden/shared/tools";
+import { getEffectiveBootConfig, getEffectiveBootSearchConfig } from "./runtime-config.js";
 
 export function getTelegramUserId(ctx: Context) {
   const id = ctx.from?.id;
@@ -36,6 +37,7 @@ export async function rememberTelegramUser(ctx: Context) {
 }
 
 export async function replyAsMakoto(ctx: Context, content: string) {
+  const [bootConfig, searchConfig] = await Promise.all([getEffectiveBootConfig(), getEffectiveBootSearchConfig()]);
   const telegramUserId = getTelegramUserId(ctx);
   await rememberTelegramUser(ctx);
 
@@ -48,7 +50,7 @@ export async function replyAsMakoto(ctx: Context, content: string) {
     content
   });
 
-  const queryEmbedding = await embedText(content);
+  const queryEmbedding = await embedText(content, bootConfig);
   let memories = await searchMemories({
     telegramUserId,
     embedding: queryEmbedding,
@@ -63,7 +65,7 @@ export async function replyAsMakoto(ctx: Context, content: string) {
     });
   }
   const recentMessages = await getRecentMessages(telegramUserId, 12);
-  const webSearch = await resolveWebSearchForMessage(content);
+  const webSearch = await resolveWebSearchForMessage(content, { searchConfig });
 
   const reply = await generateMakotoReply({
     userName: ctx.from?.first_name ?? ctx.from?.username ?? null,
@@ -71,6 +73,7 @@ export async function replyAsMakoto(ctx: Context, content: string) {
     memories,
     webSearch: webSearch.response,
     webSearchError: webSearch.error,
+    config: bootConfig,
     history: recentMessages.map((message) => ({
       role: message.role as "user" | "assistant" | "system",
       content: message.content
@@ -87,11 +90,12 @@ export async function replyAsMakoto(ctx: Context, content: string) {
   const memorySummary = await summarizeForMemory({
     userName: ctx.from?.first_name ?? ctx.from?.username ?? null,
     userMessage: content,
-    assistantReply: reply
+    assistantReply: reply,
+    config: bootConfig
   });
 
   if (memorySummary) {
-    const memoryEmbedding = await embedText(memorySummary);
+    const memoryEmbedding = await embedText(memorySummary, bootConfig);
     await createMemory({
       telegramUserId,
       summary: memorySummary,
@@ -111,7 +115,7 @@ export async function replyAsMakoto(ctx: Context, content: string) {
 
 export async function recallMemories(ctx: Context, query: string) {
   const telegramUserId = getTelegramUserId(ctx);
-  const embedding = await embedText(query);
+  const embedding = await embedText(query, await getEffectiveBootConfig());
   return searchMemories({
     telegramUserId,
     embedding,

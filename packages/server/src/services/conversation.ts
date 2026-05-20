@@ -9,6 +9,7 @@ import {
 import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, summarizeForMemory } from "@raiden/shared/boot";
 import { resolveWebSearchForMessage } from "@raiden/shared/tools";
+import { getEffectiveBootConfig, getEffectiveBootSearchConfig } from "../runtime-config.js";
 
 export type ConversationInput = {
   telegramUserId: string;
@@ -21,6 +22,8 @@ export type ConversationInput = {
 };
 
 export async function handleConversation(input: ConversationInput) {
+  const [bootConfig, searchConfig] = await Promise.all([getEffectiveBootConfig(), getEffectiveBootSearchConfig()]);
+
   await upsertTelegramUser({
     telegramId: input.telegramUserId,
     username: input.username ?? null,
@@ -38,7 +41,7 @@ export async function handleConversation(input: ConversationInput) {
     content: input.content
   });
 
-  const queryEmbedding = await embedText(input.content);
+  const queryEmbedding = await embedText(input.content, bootConfig);
   let memories = await searchMemories({
     telegramUserId: input.telegramUserId,
     embedding: queryEmbedding,
@@ -53,7 +56,7 @@ export async function handleConversation(input: ConversationInput) {
     });
   }
   const recentMessages = await getRecentMessages(input.telegramUserId, 12);
-  const webSearch = await resolveWebSearchForMessage(input.content);
+  const webSearch = await resolveWebSearchForMessage(input.content, { searchConfig });
 
   const reply = await generateMakotoReply({
     userName: input.firstName ?? input.username ?? null,
@@ -61,6 +64,7 @@ export async function handleConversation(input: ConversationInput) {
     memories,
     webSearch: webSearch.response,
     webSearchError: webSearch.error,
+    config: bootConfig,
     history: recentMessages.map((message) => ({
       role: message.role as "user" | "assistant" | "system",
       content: message.content
@@ -77,11 +81,12 @@ export async function handleConversation(input: ConversationInput) {
   const memorySummary = await summarizeForMemory({
     userName: input.firstName ?? input.username ?? null,
     userMessage: input.content,
-    assistantReply: reply
+    assistantReply: reply,
+    config: bootConfig
   });
 
   if (memorySummary) {
-    const memoryEmbedding = await embedText(memorySummary);
+    const memoryEmbedding = await embedText(memorySummary, bootConfig);
     await createMemory({
       telegramUserId: input.telegramUserId,
       summary: memorySummary,

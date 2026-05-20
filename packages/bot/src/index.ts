@@ -3,6 +3,7 @@ import { Bot, InputFile } from "grammy";
 import { generateMakotoImage } from "@raiden/shared/boot";
 import { formatBootSearchError } from "@raiden/shared/search";
 import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
+import { enforceTelegramAccess } from "./access.js";
 import { getBotEnv } from "./env.js";
 import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
 
@@ -11,6 +12,8 @@ config();
 
 const env = getBotEnv();
 const bot = new Bot(env.BOT_TOKEN);
+
+bot.use(enforceTelegramAccess);
 
 bot.api.setMyCommands([
   { command: "start", description: "开始与雷电真对话" },

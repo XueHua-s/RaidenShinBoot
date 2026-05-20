@@ -1,9 +1,11 @@
 import { zValidator } from "@hono/zod-validator";
 import { chatRequestSchema } from "@raiden/shared";
 import { Hono } from "hono";
+import { requirePermission, type AuthVariables } from "../auth.js";
 import { handleConversation } from "../services/conversation.js";
 
-export const chatRoute = new Hono().post("/", zValidator("json", chatRequestSchema), async (c) => {
+export const chatRoute = new Hono<{ Variables: AuthVariables }>().post("/", zValidator("json", chatRequestSchema), async (c) => {
+  requirePermission(c, "conversation:write");
   const body = c.req.valid("json");
   const result = await handleConversation({
     telegramUserId: body.telegramUserId,

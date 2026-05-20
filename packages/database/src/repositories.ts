@@ -1,7 +1,31 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { getDatabase } from "./client.js";
-import { conversations, memories, messages, telegramUsers } from "./schema.js";
-import type { NewMessage, NewTelegramUser } from "./schema.js";
+import {
+  adminSessions,
+  adminUsers,
+  auditLogs,
+  conversations,
+  memories,
+  messages,
+  runtimeSettings,
+  telegramChats,
+  telegramChatMembers,
+  telegramCommandPermissions,
+  telegramUsers
+} from "./schema.js";
+import type {
+  AdminUser,
+  NewAdminSession,
+  NewAdminUser,
+  NewRuntimeSetting,
+  NewMessage,
+  RuntimeSetting,
+  NewTelegramChat,
+  NewTelegramChatMember,
+  NewTelegramCommandPermission,
+  NewTelegramUser
+} from "./schema.js";
 
 export type PaginationInput = {
   limit?: number;
@@ -25,20 +49,370 @@ const defaultPagination = {
   offset: 0
 };
 
-function toIsoDate<T extends { createdAt?: Date; updatedAt?: Date; firstSeenAt?: Date; lastAccessedAt?: Date | null }>(
-  row: T
-) {
+const encryptedValuePrefix = "aes-256-gcm:v1";
+
+function toIsoDate<
+  T extends {
+    createdAt?: Date;
+    updatedAt?: Date;
+    firstSeenAt?: Date;
+    lastAccessedAt?: Date | null;
+    lastLoginAt?: Date | null;
+    expiresAt?: Date;
+    revokedAt?: Date | null;
+  }
+>(row: T) {
   return {
     ...row,
     createdAt: row.createdAt?.toISOString(),
     updatedAt: row.updatedAt?.toISOString(),
     firstSeenAt: row.firstSeenAt?.toISOString(),
-    lastAccessedAt: row.lastAccessedAt?.toISOString() ?? null
+    lastAccessedAt: row.lastAccessedAt?.toISOString() ?? null,
+    lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
+    expiresAt: row.expiresAt?.toISOString(),
+    revokedAt: row.revokedAt?.toISOString() ?? null
   };
 }
 
 export function vectorLiteral(values: number[]) {
   return `[${values.map((value) => Number(value).toFixed(8)).join(",")}]`;
+}
+
+function runtimeSettingsEncryptionKey() {
+  const secret = process.env.BOOT_SETTINGS_ENCRYPTION_KEY?.trim();
+  if (!secret) {
+    return null;
+  }
+
+  return createHash("sha256").update(secret).digest();
+}
+
+export function isRuntimeSettingsSecretStorageReady() {
+  return Boolean(runtimeSettingsEncryptionKey());
+}
+
+export function encryptRuntimeSettingValue(value: string) {
+  const key = runtimeSettingsEncryptionKey();
+  if (!key) {
+    throw new Error("BOOT_SETTINGS_ENCRYPTION_KEY is required to store secret runtime settings");
+  }
+
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [encryptedValuePrefix, iv.toString("base64url"), tag.toString("base64url"), encrypted.toString("base64url")].join(":");
+}
+
+export function decryptRuntimeSettingValue(value: string) {
+  const key = runtimeSettingsEncryptionKey();
+  if (!key) {
+    return null;
+  }
+
+  const [prefix, version, ivValue, tagValue, encryptedValue] = value.split(":");
+  if (`${prefix}:${version}` !== encryptedValuePrefix || !ivValue || !tagValue || !encryptedValue) {
+    return null;
+  }
+
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivValue, "base64url"));
+  decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedValue, "base64url")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+export async function createAdminUser(input: NewAdminUser) {
+  const db = getDatabase();
+  const [user] = await db.insert(adminUsers).values(input).returning();
+  if (!user) {
+    throw new Error("Failed to create admin user");
+  }
+
+  return user;
+}
+
+export async function findAdminByUsername(username: string) {
+  const db = getDatabase();
+  const [user] = await db
+    .select()
+    .from(adminUsers)
+    .where(eq(adminUsers.username, username))
+    .limit(1);
+
+  return user ?? null;
+}
+
+export async function findAdminById(id: string) {
+  const db = getDatabase();
+  const [user] = await db.select().from(adminUsers).where(eq(adminUsers.id, id)).limit(1);
+  return user ?? null;
+}
+
+export async function listAdminUsers(input: PaginationInput = defaultPagination) {
+  const db = getDatabase();
+  const limit = input.limit ?? defaultPagination.limit;
+  const offset = input.offset ?? defaultPagination.offset;
+  const rows = await db
+    .select({
+      id: adminUsers.id,
+      username: adminUsers.username,
+      displayName: adminUsers.displayName,
+      role: adminUsers.role,
+      status: adminUsers.status,
+      lastLoginAt: adminUsers.lastLoginAt,
+      createdAt: adminUsers.createdAt,
+      updatedAt: adminUsers.updatedAt
+    })
+    .from(adminUsers)
+    .orderBy(desc(adminUsers.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(toIsoDate);
+}
+
+export async function countAdminUsers() {
+  const db = getDatabase();
+  const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(adminUsers);
+  return row?.count ?? 0;
+}
+
+export async function countActiveSuperAdmins() {
+  const db = getDatabase();
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(adminUsers)
+    .where(and(eq(adminUsers.role, "super_admin"), eq(adminUsers.status, "active")));
+
+  return row?.count ?? 0;
+}
+
+export async function updateAdminUser(
+  id: string,
+  input: Partial<Pick<AdminUser, "displayName" | "passwordHash" | "role" | "status">>
+) {
+  const db = getDatabase();
+  const [user] = await db
+    .update(adminUsers)
+    .set({
+      ...input,
+      updatedAt: new Date()
+    })
+    .where(eq(adminUsers.id, id))
+    .returning();
+
+  return user ?? null;
+}
+
+export async function markAdminLogin(id: string) {
+  const db = getDatabase();
+  await db
+    .update(adminUsers)
+    .set({
+      lastLoginAt: new Date(),
+      updatedAt: new Date()
+    })
+    .where(eq(adminUsers.id, id));
+}
+
+export async function createAdminSession(input: NewAdminSession) {
+  const db = getDatabase();
+  const [session] = await db.insert(adminSessions).values(input).returning();
+  if (!session) {
+    throw new Error("Failed to create admin session");
+  }
+
+  return session;
+}
+
+export async function findAdminSessionByTokenHash(tokenHash: string) {
+  const db = getDatabase();
+  const [row] = await db
+    .select({
+      session: adminSessions,
+      admin: adminUsers
+    })
+    .from(adminSessions)
+    .innerJoin(adminUsers, eq(adminSessions.adminUserId, adminUsers.id))
+    .where(eq(adminSessions.tokenHash, tokenHash))
+    .limit(1);
+
+  return row ?? null;
+}
+
+export async function revokeAdminSession(id: string) {
+  const db = getDatabase();
+  const [session] = await db
+    .update(adminSessions)
+    .set({ revokedAt: new Date() })
+    .where(eq(adminSessions.id, id))
+    .returning();
+
+  return session ?? null;
+}
+
+export async function updateAdminSessionCsrf(id: string, csrfTokenHash: string) {
+  const db = getDatabase();
+  const [session] = await db
+    .update(adminSessions)
+    .set({ csrfTokenHash })
+    .where(eq(adminSessions.id, id))
+    .returning();
+
+  return session ?? null;
+}
+
+export async function listAdminSessions(input: PaginationInput = defaultPagination) {
+  const db = getDatabase();
+  const limit = input.limit ?? defaultPagination.limit;
+  const offset = input.offset ?? defaultPagination.offset;
+  const rows = await db
+    .select({
+      id: adminSessions.id,
+      adminUserId: adminSessions.adminUserId,
+      username: adminUsers.username,
+      role: adminUsers.role,
+      expiresAt: adminSessions.expiresAt,
+      revokedAt: adminSessions.revokedAt,
+      createdAt: adminSessions.createdAt
+    })
+    .from(adminSessions)
+    .innerJoin(adminUsers, eq(adminSessions.adminUserId, adminUsers.id))
+    .orderBy(desc(adminSessions.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(toIsoDate);
+}
+
+export async function countAdminSessions() {
+  const db = getDatabase();
+  const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(adminSessions);
+  return row?.count ?? 0;
+}
+
+export async function createAuditLog(input: {
+  actorAdminId?: string | null;
+  action: string;
+  targetType: string;
+  targetId?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}) {
+  const db = getDatabase();
+  const [row] = await db
+    .insert(auditLogs)
+    .values({
+      actorAdminId: input.actorAdminId ?? null,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId ?? null,
+      before: input.before ?? null,
+      after: input.after ?? null,
+      ipAddress: input.ipAddress ?? null,
+      userAgent: input.userAgent ?? null
+    })
+    .returning();
+
+  if (!row) {
+    throw new Error("Failed to create audit log");
+  }
+
+  return row;
+}
+
+export async function listAuditLogs(input: PaginationInput = defaultPagination) {
+  const db = getDatabase();
+  const limit = input.limit ?? defaultPagination.limit;
+  const offset = input.offset ?? defaultPagination.offset;
+  const rows = await db
+    .select({
+      id: auditLogs.id,
+      actorAdminId: auditLogs.actorAdminId,
+      actorUsername: adminUsers.username,
+      action: auditLogs.action,
+      targetType: auditLogs.targetType,
+      targetId: auditLogs.targetId,
+      before: auditLogs.before,
+      after: auditLogs.after,
+      ipAddress: auditLogs.ipAddress,
+      userAgent: auditLogs.userAgent,
+      createdAt: auditLogs.createdAt
+    })
+    .from(auditLogs)
+    .leftJoin(adminUsers, eq(auditLogs.actorAdminId, adminUsers.id))
+    .orderBy(desc(auditLogs.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(toIsoDate);
+}
+
+export async function countAuditLogs() {
+  const db = getDatabase();
+  const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(auditLogs);
+  return row?.count ?? 0;
+}
+
+export async function listRuntimeSettings() {
+  const db = getDatabase();
+  const rows = await db.select().from(runtimeSettings).orderBy(runtimeSettings.key);
+  return rows.map(toIsoDate);
+}
+
+export async function getRuntimeSetting(key: string) {
+  const db = getDatabase();
+  const [row] = await db.select().from(runtimeSettings).where(eq(runtimeSettings.key, key)).limit(1);
+  return row ?? null;
+}
+
+export async function upsertRuntimeSetting(input: NewRuntimeSetting) {
+  const db = getDatabase();
+  const [row] = await db
+    .insert(runtimeSettings)
+    .values(input)
+    .onConflictDoUpdate({
+      target: runtimeSettings.key,
+      set: {
+        value: input.value ?? null,
+        encrypted: input.encrypted ?? false,
+        updatedByAdminId: input.updatedByAdminId ?? null,
+        updatedAt: new Date()
+      }
+    })
+    .returning();
+
+  if (!row) {
+    throw new Error("Failed to upsert runtime setting");
+  }
+
+  return row;
+}
+
+export async function deleteRuntimeSetting(key: string) {
+  const db = getDatabase();
+  const [row] = await db.delete(runtimeSettings).where(eq(runtimeSettings.key, key)).returning();
+  return row ?? null;
+}
+
+export async function getRuntimeSettingsEnvOverrides() {
+  const rows = await listRuntimeSettings();
+  return rows.reduce<Record<string, string>>((accumulator, setting: RuntimeSetting) => {
+    if (!setting.value) {
+      return accumulator;
+    }
+
+    const value = setting.encrypted ? decryptRuntimeSettingValue(setting.value) : setting.value;
+    if (value) {
+      accumulator[setting.key] = value;
+    }
+
+    return accumulator;
+  }, {});
 }
 
 export async function upsertTelegramUser(input: NewTelegramUser) {
@@ -59,6 +433,206 @@ export async function upsertTelegramUser(input: NewTelegramUser) {
     .returning();
 
   return user;
+}
+
+function defaultChatStatus(type: NewTelegramChat["type"]) {
+  return type === "private" ? "approved" : "pending";
+}
+
+export async function upsertTelegramChat(input: Omit<NewTelegramChat, "status"> & { status?: NewTelegramChat["status"] }) {
+  const db = getDatabase();
+  const [chat] = await db
+    .insert(telegramChats)
+    .values({
+      ...input,
+      status: input.status ?? defaultChatStatus(input.type)
+    })
+    .onConflictDoUpdate({
+      target: telegramChats.chatId,
+      set: {
+        type: input.type,
+        title: input.title ?? null,
+        username: input.username ?? null,
+        updatedAt: new Date()
+      }
+    })
+    .returning();
+
+  if (!chat) {
+    throw new Error("Failed to upsert Telegram chat");
+  }
+
+  return chat;
+}
+
+export async function upsertTelegramChatMember(input: NewTelegramChatMember) {
+  const db = getDatabase();
+  const [member] = await db
+    .insert(telegramChatMembers)
+    .values(input)
+    .onConflictDoUpdate({
+      target: [telegramChatMembers.chatId, telegramChatMembers.telegramUserId],
+      set: {
+        role: input.role ?? null,
+        updatedAt: new Date()
+      }
+    })
+    .returning();
+
+  return member ?? null;
+}
+
+export async function listTelegramChats(input: PaginationInput = defaultPagination) {
+  const db = getDatabase();
+  const limit = input.limit ?? defaultPagination.limit;
+  const offset = input.offset ?? defaultPagination.offset;
+  const rows = await db
+    .select()
+    .from(telegramChats)
+    .orderBy(desc(telegramChats.updatedAt))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(toIsoDate);
+}
+
+export async function countTelegramChats() {
+  const db = getDatabase();
+  const [row] = await db.select({ count: sql<number>`count(*)::int` }).from(telegramChats);
+  return row?.count ?? 0;
+}
+
+export async function getTelegramChat(chatId: string) {
+  const db = getDatabase();
+  const [chat] = await db.select().from(telegramChats).where(eq(telegramChats.chatId, chatId)).limit(1);
+  return chat ?? null;
+}
+
+export async function updateTelegramChat(
+  chatId: string,
+  input: Partial<Pick<NewTelegramChat, "status" | "policy" | "title" | "username">>
+) {
+  const db = getDatabase();
+  const before = await getTelegramChat(chatId);
+  const [after] = await db
+    .update(telegramChats)
+    .set({
+      ...input,
+      updatedAt: new Date()
+    })
+    .where(eq(telegramChats.chatId, chatId))
+    .returning();
+
+  return {
+    before,
+    after: after ?? null
+  };
+}
+
+export async function listTelegramCommandPermissions(
+  input: PaginationInput & { chatId?: string | undefined } = defaultPagination
+) {
+  const db = getDatabase();
+  const limit = input.limit ?? defaultPagination.limit;
+  const offset = input.offset ?? defaultPagination.offset;
+  const rows = await db
+    .select()
+    .from(telegramCommandPermissions)
+    .where(input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined)
+    .orderBy(desc(telegramCommandPermissions.updatedAt))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(toIsoDate);
+}
+
+export async function upsertTelegramCommandPermission(input: NewTelegramCommandPermission) {
+  const db = getDatabase();
+  const rowUpdate = {
+    enabled: input.enabled,
+    updatedAt: new Date()
+  };
+  const isGlobalRule = input.chatId === null || input.chatId === undefined;
+  const [row] = isGlobalRule
+    ? await db
+        .insert(telegramCommandPermissions)
+        .values(input)
+        .onConflictDoUpdate({
+          target: telegramCommandPermissions.command,
+          targetWhere: sql`${telegramCommandPermissions.chatId} is null`,
+          set: rowUpdate
+        })
+        .returning()
+    : await db
+        .insert(telegramCommandPermissions)
+        .values(input)
+        .onConflictDoUpdate({
+          target: [telegramCommandPermissions.chatId, telegramCommandPermissions.command],
+          targetWhere: sql`${telegramCommandPermissions.chatId} is not null`,
+          set: rowUpdate
+        })
+        .returning();
+
+  if (!row) {
+    throw new Error("Failed to upsert Telegram command permission");
+  }
+
+  return row;
+}
+
+export async function resolveTelegramChatAccess(input: {
+  chatId: string;
+  type: NewTelegramChat["type"];
+  title?: string | null | undefined;
+  username?: string | null | undefined;
+  command?: string | null | undefined;
+}) {
+  const chat = await upsertTelegramChat({
+    chatId: input.chatId,
+    type: input.type,
+    title: input.title ?? null,
+    username: input.username ?? null,
+    policy: "allow_all_commands"
+  });
+
+  const db = getDatabase();
+  const permissions = input.command
+    ? await db
+        .select()
+        .from(telegramCommandPermissions)
+        .where(
+          and(
+            eq(telegramCommandPermissions.command, input.command),
+            or(eq(telegramCommandPermissions.chatId, input.chatId), isNull(telegramCommandPermissions.chatId))
+          )
+        )
+    : [];
+  const scopedPermission = permissions.find((permission) => permission.chatId === input.chatId);
+  const globalPermission = permissions.find((permission) => permission.chatId === null);
+  const permission = scopedPermission ?? globalPermission;
+
+  const commandEnabled = permission?.enabled ?? true;
+  const statusAllows = chat.status === "approved";
+  const policyAllows =
+    chat.policy === "allow_all_commands" ||
+    (chat.policy === "commands_only" && Boolean(input.command));
+  const allowed = statusAllows && policyAllows && commandEnabled;
+  let reason = "approved";
+
+  if (!statusAllows) {
+    reason = chat.status;
+  } else if (!policyAllows) {
+    reason = chat.policy;
+  } else if (!commandEnabled) {
+    reason = "command_disabled";
+  }
+
+  return {
+    chat,
+    allowed,
+    reason,
+    commandEnabled
+  };
 }
 
 export async function listTelegramUsers(input: PaginationInput = defaultPagination) {

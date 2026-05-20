@@ -4,13 +4,16 @@ import { createMemoryRequestSchema, paginationQuerySchema } from "@raiden/shared
 import { embedText } from "@raiden/shared/boot";
 import { Hono } from "hono";
 import { z } from "zod";
+import { requirePermission, type AuthVariables } from "../auth.js";
+import { getEffectiveBootConfig } from "../runtime-config.js";
 
 const memoryQuerySchema = paginationQuerySchema.extend({
   telegramUserId: z.string().optional()
 });
 
-export const memoriesRoute = new Hono()
+export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/", zValidator("query", memoryQuerySchema), async (c) => {
+    requirePermission(c, "memory:read");
     const query = c.req.valid("query");
     const [data, total] = await Promise.all([
       listMemories(query),
@@ -20,8 +23,9 @@ export const memoriesRoute = new Hono()
     return c.json({ data, total });
   })
   .post("/", zValidator("json", createMemoryRequestSchema), async (c) => {
+    requirePermission(c, "memory:write");
     const body = c.req.valid("json");
-    const embedding = await embedText(body.summary);
+    const embedding = await embedText(body.summary, await getEffectiveBootConfig());
     const memory = await createMemory({
       telegramUserId: body.telegramUserId,
       summary: body.summary,
@@ -31,4 +35,3 @@ export const memoriesRoute = new Hono()
 
     return c.json({ data: memory }, 201);
   });
-

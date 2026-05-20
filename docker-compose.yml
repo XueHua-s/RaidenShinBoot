@@ -16,6 +16,70 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+    command: ["pnpm", "db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - app
+      - migrate
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    env_file:
+      - .env
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8787
+      DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+    ports:
+      - "${SERVER_PORT:-8787}:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - app
+
+  panel:
+    build:
+      context: .
+      dockerfile: packages/panel/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8787}
+    ports:
+      - "${PANEL_PORT:-5173}:80"
+    depends_on:
+      - api
+    profiles:
+      - app
+
+  bot:
+    build:
+      context: .
+      dockerfile: packages/bot/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - bot
+
 volumes:
   raiden_shin_postgres:
-
