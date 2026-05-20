@@ -1,4 +1,9 @@
 import {
+  buildConversationCacheContextFingerprint,
+  isStandaloneCacheCandidate,
+  processMemoryEnrichmentJob
+} from "@raiden/boot";
+import {
   closeDatabase,
   createAdminUser,
   countActiveSuperAdmins,
@@ -85,6 +90,51 @@ async function main() {
   process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED = "false";
   process.env.BOOT_SEMANTIC_CACHE_ENABLED = "false";
 
+  const baseCacheFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [],
+    memories: []
+  });
+  const changedHistoryFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [{ id: "m1", role: "assistant", content: "previous reply", createdAt: "2026-01-01T00:00:00.000Z" }],
+    memories: []
+  });
+  const changedMemoryFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [],
+    memories: [
+      {
+        id: "memory-1",
+        summary: "用户喜欢稻妻茶点。",
+        importance: 6,
+        sourceMessageId: null,
+        createdAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  });
+  if (baseCacheFingerprint === changedHistoryFingerprint || baseCacheFingerprint === changedMemoryFingerprint) {
+    throw new Error("Conversation cache fingerprint should change when history or memory context changes");
+  }
+  if (isStandaloneCacheCandidate("继续说刚才那件事")) {
+    throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
+  }
+  if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
+    throw new Error("Standalone non-search prompts should be semantic-cache candidates");
+  }
+
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
@@ -163,6 +213,43 @@ async function main() {
     const health = await app.request("/api/health");
     if (!health.ok) {
       throw new Error(`Health check failed with ${health.status}`);
+    }
+
+    const originalWebhookSecret = process.env.BOOT_TELEGRAM_WEBHOOK_SECRET;
+    const originalRedisUrl = process.env.REDIS_URL;
+    process.env.BOOT_TELEGRAM_WEBHOOK_SECRET = "e2e-webhook-secret";
+    process.env.REDIS_URL = "";
+    try {
+      const rejectedWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "wrong-secret"
+        },
+        body: JSON.stringify({ update_id: 9001 })
+      });
+      if (rejectedWebhook.status !== 401) {
+        throw new Error(`Telegram webhook should reject a wrong secret with 401, got ${rejectedWebhook.status}`);
+      }
+
+      const unavailableWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "e2e-webhook-secret"
+        },
+        body: JSON.stringify({ update_id: 9002 })
+      });
+      if (unavailableWebhook.status !== 503) {
+        throw new Error(`Telegram webhook should report queue unavailability with 503, got ${unavailableWebhook.status}`);
+      }
+      const unavailableWebhookPayload = (await unavailableWebhook.json()) as { error?: string };
+      if (unavailableWebhookPayload.error !== "Telegram webhook queue unavailable") {
+        throw new Error("Telegram webhook leaked an internal queue error instead of returning a stable public error");
+      }
+    } finally {
+      restoreEnv("BOOT_TELEGRAM_WEBHOOK_SECRET", originalWebhookSecret);
+      restoreEnv("REDIS_URL", originalRedisUrl);
     }
 
     const lastSuperAdminGuardStatus =
@@ -252,9 +339,30 @@ async function main() {
       throw new Error(`First chat route failed with ${firstChat.status}: ${await firstChat.text()}`);
     }
 
-    const firstPayload = (await firstChat.json()) as { reply?: string; memoryCount?: number };
+    const firstPayload = (await firstChat.json()) as { reply?: string; memoryCount?: number; cacheStatus?: string };
     if (!firstPayload.reply || typeof firstPayload.memoryCount !== "number") {
       throw new Error("First chat route returned an invalid payload");
+    }
+    if (firstPayload.cacheStatus !== "disabled") {
+      throw new Error(`Semantic cache should be disabled during E2E smoke, got ${firstPayload.cacheStatus ?? "missing"}`);
+    }
+
+    const memoryWorkerStrictFailure = await (async () => {
+      try {
+        await processMemoryEnrichmentJob({
+          userId: apiTelegramUserId,
+          displayName: "E2E",
+          content: "这是一条 E2E 链路 worker 严格失败传播验证。",
+          reply: "我会尝试提炼这条记忆。",
+          sourceMessageId: "not-a-valid-uuid"
+        });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!memoryWorkerStrictFailure) {
+      throw new Error("Memory enrichment worker should propagate persistence failures so BullMQ can retry");
     }
 
     const apiMemories = await listMemories({ telegramUserId: apiTelegramUserId, limit: 5, offset: 0 });
@@ -664,3 +772,11 @@ async function main() {
 }
 
 await main();
+
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}

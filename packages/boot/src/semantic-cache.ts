@@ -1,8 +1,19 @@
-import { createHash } from "node:crypto";
 import { createClient, type RedisClientType } from "redis";
 import * as robot3Module from "robot3";
-import { isMemoryRecallRequest } from "@raiden/shared";
-import { shouldUseBootSearchForMessage } from "@raiden/shared/tools";
+import {
+  conversationCachePolicyVersion,
+  isStandaloneCacheCandidate,
+  normalizeCacheQuery,
+  stableHash
+} from "./semantic-cache-policy.js";
+
+export {
+  buildConversationCacheContextFingerprint,
+  conversationCachePolicyVersion,
+  conversationCacheScope,
+  isStandaloneCacheCandidate,
+  normalizeCacheQuery
+} from "./semantic-cache-policy.js";
 
 const robot3 =
   "default" in robot3Module
@@ -43,6 +54,7 @@ export type ConversationCacheWriteResult = {
 type LookupContext = {
   config: SemanticCacheConfig;
   scope: string;
+  contextFingerprint: string;
   content: string;
   normalizedQuery: string;
   embedding?: number[] | undefined;
@@ -55,9 +67,6 @@ type ErrorEvent = { type: "error"; error: unknown };
 
 const defaultCachePrefix = "boot:semantic-cache";
 const requiredEmbeddingDimensions = 3072;
-const contextualCjkQueryPattern =
-  /(继续|接着|刚才|上面|前面|上一条|前一条|之前|这个|这件|这些|那个|那件|那些|它|他们|她们|他说|她说|你说|再来|展开一下|总结一下)/i;
-const contextualEnglishQueryPattern = /\b(continue|previous|above|earlier|that|this|it|they|more)\b/i;
 
 let redisClientPromise: Promise<RedisClientType> | null = null;
 let redisClientUrl: string | null = null;
@@ -160,40 +169,18 @@ export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): Se
     prefix,
     namespace:
       optionalString(env.BOOT_SEMANTIC_CACHE_NAMESPACE) ??
-      stableHash([env.BOOT_CHAT_MODEL ?? "", env.BOOT_EMBEDDING_MODEL ?? "", "conversation-cache-v1"]).slice(0, 16),
+      stableHash([env.BOOT_CHAT_MODEL ?? "", env.BOOT_EMBEDDING_MODEL ?? "", conversationCachePolicyVersion]).slice(0, 16),
     ttlSeconds: positiveInteger(env.BOOT_SEMANTIC_CACHE_TTL_SECONDS, 86_400, 2_592_000),
     similarityThreshold: boundedNumber(env.BOOT_SEMANTIC_CACHE_THRESHOLD, 0.92, 0.5, 0.99),
     maxCandidates: positiveInteger(env.BOOT_SEMANTIC_CACHE_MAX_CANDIDATES, 8, 50),
-    indexName: optionalString(env.BOOT_SEMANTIC_CACHE_INDEX) ?? `${sanitizeIndexName(prefix)}:idx`,
+    indexName: optionalString(env.BOOT_SEMANTIC_CACHE_INDEX) ?? `${sanitizeIndexName(prefix)}:v2:idx`,
     operationTimeoutMs: positiveInteger(env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS, 750, 10_000)
   };
 }
 
-export function conversationCacheScope(input: { protocol: string; userId: string }) {
-  return `${input.protocol}:${input.userId}`;
-}
-
-export function normalizeCacheQuery(content: string) {
-  return content.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-export function isStandaloneCacheCandidate(content: string) {
-  const normalized = normalizeCacheQuery(content);
-  if (!normalized || normalized.startsWith("/") || isMemoryRecallRequest(normalized) || shouldUseBootSearchForMessage(normalized)) {
-    return false;
-  }
-  if (contextualCjkQueryPattern.test(normalized) || contextualEnglishQueryPattern.test(normalized)) {
-    return false;
-  }
-
-  const compactLength = normalized.replace(/\s+/g, "").length;
-  const hasCjk = /[\u3400-\u9fff]/.test(normalized);
-  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
-  return hasCjk ? compactLength >= 6 : compactLength >= 12 || wordCount >= 4;
-}
-
 export async function lookupConversationCache(input: {
   scope: string;
+  contextFingerprint: string;
   content: string;
   embedding?: number[] | undefined;
   config?: SemanticCacheConfig | undefined;
@@ -201,6 +188,7 @@ export async function lookupConversationCache(input: {
   const context: LookupContext = {
     config: input.config ?? getSemanticCacheConfig(),
     scope: input.scope,
+    contextFingerprint: input.contextFingerprint,
     content: input.content,
     normalizedQuery: normalizeCacheQuery(input.content),
     embedding: input.embedding
@@ -225,6 +213,7 @@ export async function lookupConversationCache(input: {
 
 export async function writeConversationCache(input: {
   scope: string;
+  contextFingerprint: string;
   content: string;
   reply: string;
   embedding: number[];
@@ -248,11 +237,12 @@ export async function writeConversationCache(input: {
       const client = await getRedisClient(config);
       await ensureVectorIndex(client, config);
 
-      const itemId = stableHash([config.namespace, input.scope, normalizedQuery, input.model]);
+      const itemId = stableHash([config.namespace, input.scope, input.contextFingerprint, normalizedQuery, input.model]);
       const itemKey = cacheItemKey(config, itemId);
-      const exactKey = exactCacheKey(config, input.scope, normalizedQuery);
+      const exactKey = exactCacheKey(config, input.scope, input.contextFingerprint, normalizedQuery);
       await client.hSet(itemKey, {
         scope: input.scope,
+        contextFingerprint: input.contextFingerprint,
         namespace: config.namespace,
         normalizedQuery,
         query: input.content,
@@ -279,13 +269,15 @@ async function readExactCache(context: LookupContext): Promise<ConversationCache
   }
 
   const client = await getRedisClient(context.config);
-  const itemKey = await client.get(exactCacheKey(context.config, context.scope, context.normalizedQuery));
+  const itemKey = await client.get(
+    exactCacheKey(context.config, context.scope, context.contextFingerprint, context.normalizedQuery)
+  );
   if (!itemKey) {
     return null;
   }
 
   const entry = await client.hGetAll(itemKey);
-  if (!validEntry(entry, context.config.namespace, context.scope)) {
+  if (!validEntry(entry, context.config.namespace, context.scope, context.contextFingerprint)) {
     return null;
   }
 
@@ -311,7 +303,7 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
   const response = await client.sendCommand([
     "FT.SEARCH",
     context.config.indexName,
-    `(@namespace:{${escapeTagValue(context.config.namespace)}} @scope:{${escapeTagValue(context.scope)}})=>[KNN ${context.config.maxCandidates} @embedding $embedding AS distance]`,
+    `(@namespace:{${escapeTagValue(context.config.namespace)}} @scope:{${escapeTagValue(context.scope)}} @contextFingerprint:{${escapeTagValue(context.contextFingerprint)}})=>[KNN ${context.config.maxCandidates} @embedding $embedding AS distance]`,
     "PARAMS",
     "2",
     "embedding",
@@ -319,9 +311,10 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
     "SORTBY",
     "distance",
     "RETURN",
-    "6",
+    "7",
     "namespace",
     "scope",
+    "contextFingerprint",
     "normalizedQuery",
     "query",
     "reply",
@@ -332,7 +325,13 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
   const maxDistance = 1 - context.config.similarityThreshold;
 
   for (const hit of parseSearchResponse(response)) {
-    if (hit.namespace !== context.config.namespace || hit.scope !== context.scope || !hit.reply || hit.distance > maxDistance) {
+    if (
+      hit.namespace !== context.config.namespace ||
+      hit.scope !== context.scope ||
+      hit.contextFingerprint !== context.contextFingerprint ||
+      !hit.reply ||
+      hit.distance > maxDistance
+    ) {
       continue;
     }
 
@@ -432,6 +431,8 @@ async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheC
       "TAG",
       "scope",
       "TAG",
+      "contextFingerprint",
+      "TAG",
       "normalizedQuery",
       "TEXT",
       "query",
@@ -468,9 +469,16 @@ async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheC
 function validEntry(
   entry: Record<string, string>,
   namespace: string,
-  scope: string
+  scope: string,
+  contextFingerprint: string
 ): entry is Record<string, string> & { reply: string } {
-  return entry.namespace === namespace && entry.scope === scope && typeof entry.reply === "string" && entry.reply.length > 0;
+  return (
+    entry.namespace === namespace &&
+    entry.scope === scope &&
+    entry.contextFingerprint === contextFingerprint &&
+    typeof entry.reply === "string" &&
+    entry.reply.length > 0
+  );
 }
 
 function parseSearchResponse(response: unknown) {
@@ -482,6 +490,7 @@ function parseSearchResponse(response: unknown) {
     key: string;
     namespace: string | undefined;
     scope: string | undefined;
+    contextFingerprint: string | undefined;
     reply: string | undefined;
     distance: number;
   }> = [];
@@ -505,6 +514,7 @@ function parseSearchResponse(response: unknown) {
       key,
       namespace: record.namespace,
       scope: record.scope,
+      contextFingerprint: record.contextFingerprint,
       reply: record.reply,
       distance: Number(record.distance ?? Number.POSITIVE_INFINITY)
     });
@@ -540,16 +550,12 @@ function float32VectorBuffer(values: number[]) {
   return buffer;
 }
 
-function exactCacheKey(config: SemanticCacheConfig, scope: string, normalizedQuery: string) {
-  return `${config.prefix}:exact:${stableHash([config.namespace, scope, normalizedQuery])}`;
+function exactCacheKey(config: SemanticCacheConfig, scope: string, contextFingerprint: string, normalizedQuery: string) {
+  return `${config.prefix}:exact:${stableHash([config.namespace, scope, contextFingerprint, normalizedQuery])}`;
 }
 
 function cacheItemKey(config: SemanticCacheConfig, itemId: string) {
   return `${config.prefix}:item:${itemId}`;
-}
-
-function stableHash(parts: string[]) {
-  return createHash("sha256").update(parts.join("\0")).digest("hex");
 }
 
 function sanitizeIndexName(value: string) {

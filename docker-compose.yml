@@ -90,6 +90,7 @@ services:
     environment:
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
       REDIS_URL: redis://redis:6379
+      BOT_RUNTIME_MODE: polling
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +110,7 @@ services:
     environment:
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
       REDIS_URL: redis://redis:6379
+      BOT_RUNTIME_MODE: worker
       BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED: "true"
     command: ["pnpm", "--filter", "@raiden/bot", "start:worker"]
     depends_on:

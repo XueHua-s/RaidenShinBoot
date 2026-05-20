@@ -13,6 +13,7 @@ import { getBootSearchConfig } from "@raiden/shared/search";
 import { resolveWebSearchForMessage } from "@raiden/shared/tools";
 import { enqueueMemoryEnrichment, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
 import {
+  buildConversationCacheContextFingerprint,
   conversationCacheScope,
   getSemanticCacheConfig,
   lookupConversationCache,
@@ -37,6 +38,15 @@ export type BootUserIdentity = {
 export type BootConversationInput = BootUserIdentity & {
   content: string;
   sourceMessageId?: number | null;
+};
+
+type DurableMemoryInput = {
+  userId: string;
+  displayName: string | null;
+  content: string;
+  reply: string;
+  sourceMessageId: string;
+  bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
 };
 
 function storageUserId(identity: BootUserIdentity) {
@@ -107,8 +117,23 @@ export async function runBootConversation(input: BootConversationInput) {
 
   await rememberBootUser(input);
 
+  const [recentMessages, cacheContextMemories] = await Promise.all([
+    getRecentMessages(userId, 12),
+    listMemories({ telegramUserId: userId, limit: 10, offset: 0 })
+  ]);
+  const cacheContextFingerprint = buildConversationCacheContextFingerprint({
+    protocol: input.protocol,
+    userId: input.userId,
+    chatModel: bootConfig.BOOT_CHAT_MODEL,
+    embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
+    searchProvider: searchConfig.BOOT_SEARCH_PROVIDER,
+    history: recentMessages,
+    memories: cacheContextMemories
+  });
+
   const exactCache = await lookupConversationCache({
     scope: cacheScope,
+    contextFingerprint: cacheContextFingerprint,
     content: input.content,
     config: semanticCacheConfig
   });
@@ -119,20 +144,26 @@ export async function runBootConversation(input: BootConversationInput) {
       hit: exactCache
     });
   }
+  let cacheStatus: Extract<ConversationCacheStatus, "disabled" | "miss"> =
+    exactCache.status === "disabled" ? "disabled" : "miss";
 
   const queryEmbedding = await embedText(input.content, bootConfig);
-  const semanticCache = await lookupConversationCache({
-    scope: cacheScope,
-    content: input.content,
-    embedding: queryEmbedding,
-    config: semanticCacheConfig
-  });
-  if (semanticCache.status === "l2_hit") {
-    return saveCachedReply({
-      input,
-      userId,
-      hit: semanticCache
+  if (exactCache.status !== "disabled") {
+    const semanticCache = await lookupConversationCache({
+      scope: cacheScope,
+      contextFingerprint: cacheContextFingerprint,
+      content: input.content,
+      embedding: queryEmbedding,
+      config: semanticCacheConfig
     });
+    if (semanticCache.status === "l2_hit") {
+      return saveCachedReply({
+        input,
+        userId,
+        hit: semanticCache
+      });
+    }
+    cacheStatus = semanticCache.status === "disabled" ? "disabled" : "miss";
   }
 
   let memories = await searchMemories({
@@ -149,7 +180,6 @@ export async function runBootConversation(input: BootConversationInput) {
     });
   }
 
-  const recentMessages = await getRecentMessages(userId, 12);
   const webSearch = await resolveWebSearchForMessage(input.content, { searchConfig });
   const displayName = input.firstName ?? input.username ?? null;
 
@@ -183,6 +213,7 @@ export async function runBootConversation(input: BootConversationInput) {
   });
   void writeConversationCache({
     scope: cacheScope,
+    contextFingerprint: cacheContextFingerprint,
     content: input.content,
     reply,
     embedding: queryEmbedding,
@@ -199,7 +230,7 @@ export async function runBootConversation(input: BootConversationInput) {
     memoryCount: memories.length,
     webSearchResultCount: webSearch.response?.results.length ?? 0,
     webSearchStatus: webSearch.status,
-    cacheStatus: "miss" satisfies ConversationCacheStatus,
+    cacheStatus,
     cacheSimilarity: null,
     userMessageId: userMessage.id,
     assistantMessageId: assistantMessage.id
@@ -249,54 +280,46 @@ async function scheduleDurableMemoryIfUseful(
       return;
     } catch (error) {
       console.warn("Memory enrichment enqueue failed; falling back to background inline task.", error instanceof Error ? error.message : error);
-      void createDurableMemoryIfUseful(input).catch((backgroundError) => {
-        console.warn(
-          "Background durable memory creation failed after enqueue fallback.",
-          backgroundError instanceof Error ? backgroundError.message : backgroundError
-        );
-      });
+      void createDurableMemoryBestEffort(input, "Background durable memory creation failed after enqueue fallback.");
       return;
     }
   }
 
-  await createDurableMemoryIfUseful(input);
+  await createDurableMemoryBestEffort(input, "Durable memory creation failed; reply was already saved.");
 }
 
-async function createDurableMemoryIfUseful(input: {
-  userId: string;
-  displayName: string | null;
-  content: string;
-  reply: string;
-  sourceMessageId: string;
-  bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
-}) {
+async function createDurableMemoryBestEffort(input: DurableMemoryInput, message: string) {
   try {
-    const memorySummary = await summarizeForMemory({
-      userName: input.displayName,
-      userMessage: input.content,
-      assistantReply: input.reply,
-      config: input.bootConfig
-    });
-
-    if (!memorySummary) {
-      return;
-    }
-
-    const memoryEmbedding = await embedText(memorySummary, input.bootConfig);
-    await createMemory({
-      telegramUserId: input.userId,
-      summary: memorySummary,
-      embedding: memoryEmbedding,
-      importance: 6,
-      sourceMessageId: input.sourceMessageId
-    });
+    await createDurableMemory(input);
   } catch (error) {
-    console.warn("Durable memory creation failed; reply was already saved.", error instanceof Error ? error.message : error);
+    console.warn(message, error instanceof Error ? error.message : error);
   }
+}
+
+async function createDurableMemory(input: DurableMemoryInput) {
+  const memorySummary = await summarizeForMemory({
+    userName: input.displayName,
+    userMessage: input.content,
+    assistantReply: input.reply,
+    config: input.bootConfig
+  });
+
+  if (!memorySummary) {
+    return;
+  }
+
+  const memoryEmbedding = await embedText(memorySummary, input.bootConfig);
+  await createMemory({
+    telegramUserId: input.userId,
+    summary: memorySummary,
+    embedding: memoryEmbedding,
+    importance: 6,
+    sourceMessageId: input.sourceMessageId
+  });
 }
 
 export async function processMemoryEnrichmentJob(input: MemoryEnrichmentJob) {
-  await createDurableMemoryIfUseful({
+  await createDurableMemory({
     ...input,
     bootConfig: await getEffectiveBootConfig()
   });

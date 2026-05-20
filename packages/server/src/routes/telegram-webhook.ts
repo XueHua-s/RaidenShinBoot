@@ -30,6 +30,12 @@ export const telegramWebhookRoute = new Hono().post("/", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const status = /REDIS_URL/.test(message) ? 503 : 400;
-    return c.json({ error: message }, status);
+    console.warn("Telegram webhook enqueue failed.", message);
+    return c.json(
+      {
+        error: status === 503 ? "Telegram webhook queue unavailable" : "Invalid Telegram update payload"
+      },
+      status
+    );
   }
 });

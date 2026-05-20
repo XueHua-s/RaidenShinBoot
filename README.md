@@ -31,6 +31,7 @@ pnpm dev:bot
 Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
 Set `REDIS_URL` to enable BullMQ jobs, Telegram webhook ingestion, and L1/L2 semantic response cache. Without Redis, local long polling still works and durable memory falls back to the original inline path.
 For webhook mode, set `BOOT_TELEGRAM_WEBHOOK_SECRET`, configure Telegram to send updates to `POST /api/telegram/webhook` with that `secret_token`, set `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`, and run the worker with `pnpm --filter @raiden/bot dev:worker`.
+Optionally set `BOT_RUNTIME_MODE=polling` or `BOT_RUNTIME_MODE=worker` as a startup guard so the wrong process cannot be launched in a deployment slot.
 When testing the admin panel locally, keep the browser host and `VITE_API_BASE_URL` host consistent, for example `http://localhost:5173` with `http://localhost:8787` or `http://127.0.0.1:5173` with `http://127.0.0.1:8787`. Admin session cookies are host-bound, so mixing `localhost` and `127.0.0.1` can make authenticated panel requests look unauthorized.
 Create the first admin with `pnpm admin:bootstrap`; the command requires `ADMIN_USERNAME` and an `ADMIN_PASSWORD` of at least 12 characters and never creates a default production account.
 Set `BOOT_SETTINGS_ENCRYPTION_KEY` before saving relay keys in the admin System page; model names and base URLs can be managed without it, but secrets are rejected unless encrypted storage is ready.
@@ -81,6 +82,7 @@ Response cache behavior:
 - L3 cold path: full boot conversation pipeline; successful standalone answers are cached for `BOOT_SEMANTIC_CACHE_TTL_SECONDS`.
 
 The cache is intentionally per user by default because replies can include persona, conversation, search, and private memory context. Explicit search/current-events requests are excluded from response caching. Cache reads and writes are best-effort and fail open after `BOOT_SEMANTIC_CACHE_TIMEOUT_MS`.
+Cache keys also include a conversation context fingerprint built from the active models, search provider, recent message window, and recent memory metadata, so a reply generated in one conversational state is not reused after the surrounding context changes.
 
 ## AI Relay Configuration
 

@@ -6,12 +6,13 @@ import {
   processMemoryEnrichmentJob
 } from "@raiden/boot";
 import { createRaidenBot, setRaidenBotCommands } from "./bot.js";
-import { getBotEnv } from "./env.js";
+import { assertBotRuntimeMode, getBotEnv } from "./env.js";
 
 config({ path: new URL("../../../.env", import.meta.url) });
 config();
 
 const env = getBotEnv();
+assertBotRuntimeMode(env, "worker");
 const bot = createRaidenBot(env.BOT_TOKEN);
 
 await setRaidenBotCommands(bot);
