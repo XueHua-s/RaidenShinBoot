@@ -11,11 +11,13 @@
 
 - `packages/shared`: 共享 Zod schema、人格 prompt、Vercel AI SDK v6 boot 客户端。
 - `packages/database`: PostgreSQL + Drizzle schema、pgvector `halfvec(3072)`、HNSW 索引和仓储层。
-- `packages/server`: Hono API、链式路由、`AppType` 导出和聊天服务编排。
-- `packages/bot`: grammY Telegram bot，复用同一套人格、长期记忆和数据库逻辑。
+- `packages/boot`: 跨入口聊天编排层，复用 database/shared 能力处理用户身份、消息、embedding、长期记忆、搜索和回复生成。
+- `packages/server`: Hono API、链式路由、`AppType` 导出、HTTP 鉴权和路由编排。
+- `packages/bot`: grammY Telegram bot，复用 `packages/boot` 的人格、长期记忆、搜索和数据库链路。
 - `packages/panel`: React 19 + Refine v4 + Tailwind CSS v4 管理后台；等价于本项目的 web 工作区。
 - `docker-compose.yml`: 本地 pgvector PostgreSQL 服务。
 - `skills/*`: 根仓库技能，负责结构导航、跨包规范、设计和 review。
+- `.claude/agents/*`: Claude Code 项目级子 agent 定义，按读写权限、包边界和验证职责拆分。
 - `.agents/*`, `.claude/*`: agent 入口说明，不承载业务代码。
 
 ## Skill Routing
@@ -51,6 +53,7 @@
 - 安装：`pnpm install`
 - 全量类型检查：`pnpm check`
 - 全量构建：`pnpm build`
+- Boot 局部类型检查：`pnpm --filter @raiden/boot check`
 - 数据库迁移生成：`pnpm db:generate`
 - 数据库迁移执行：`pnpm db:migrate`
 - API 开发：`pnpm dev:server`
@@ -61,5 +64,5 @@
 ## Cross-Package Notes
 
 - 只改管理后台时，不要顺手修改 bot/server/database，除非 typed API 或数据契约确实需要同步。
-- 只改 bot 命令时，先确认是否应复用 `packages/server/src/services/conversation.ts` 或抽到 shared/database，避免行为分叉。
+- 只改 bot/server 聊天链路时，先确认是否应复用 `packages/boot/src/index.ts`，避免人格、记忆、搜索或 embedding 行为分叉。
 - 跨包改动最终交付时，要明确说明改动涉及哪些 package，以及跑过哪些验证命令。

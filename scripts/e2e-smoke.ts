@@ -11,6 +11,7 @@ import {
 } from "@raiden/database";
 import { app } from "@raiden/server/app";
 import { hashPassword } from "@raiden/server/auth";
+import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
@@ -316,13 +317,75 @@ async function main() {
     if (!toolsResponse.ok) {
       throw new Error(`Search tools route failed with ${toolsResponse.status}: ${await toolsResponse.text()}`);
     }
-    const toolsPayload = (await toolsResponse.json()) as { tools?: Array<{ name?: string }> };
+    const toolsPayload = (await toolsResponse.json()) as { tools?: BootToolDescriptor[] };
+    const tools = toolsPayload.tools ?? [];
+    const webTool = tools.find((tool) => tool.name === "web_search");
+    const googleTool = tools.find((tool) => tool.name === "google_search");
     if (
-      !toolsPayload.tools?.some((tool) => tool.name === "web_search") ||
-      !toolsPayload.tools.some((tool) => tool.name === "wikipedia_search") ||
-      !toolsPayload.tools.some((tool) => tool.name === "moegirl_search")
+      !webTool ||
+      !googleTool ||
+      !tools.some((tool) => tool.name === "wikipedia_search") ||
+      !tools.some((tool) => tool.name === "moegirl_search")
     ) {
       throw new Error("Boot tool registry did not expose routed and specialized search tools");
+    }
+    if (
+      webTool.exposure !== "direct" ||
+      googleTool.exposure !== "deferred" ||
+      !webTool.readOnly ||
+      webTool.destructive ||
+      !webTool.concurrencySafe ||
+      !webTool.capabilities.includes("router")
+    ) {
+      throw new Error("Boot tool registry did not expose expected safety and discovery metadata");
+    }
+
+    const exactToolSearchResponse = await authedRequest("/api/search/tools/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: "select:moegirl_search,web_search,moegirl_search",
+        maxResults: 5
+      })
+    });
+    if (!exactToolSearchResponse.ok) {
+      throw new Error(`Tool exact-search route failed with ${exactToolSearchResponse.status}: ${await exactToolSearchResponse.text()}`);
+    }
+    const exactToolSearchPayload = (await exactToolSearchResponse.json()) as BootToolSearchResponse;
+    if (exactToolSearchPayload.matches.map((tool) => tool.name).join(",") !== "moegirl_search,web_search") {
+      throw new Error("Tool exact-search route should preserve requested order and de-duplicate matches");
+    }
+
+    const keywordToolSearchResponse = await authedRequest("/api/search/tools/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: "+persona anime",
+        maxResults: 2
+      })
+    });
+    if (!keywordToolSearchResponse.ok) {
+      throw new Error(`Tool keyword-search route failed with ${keywordToolSearchResponse.status}: ${await keywordToolSearchResponse.text()}`);
+    }
+    const keywordToolSearchPayload = (await keywordToolSearchResponse.json()) as BootToolSearchResponse;
+    if (keywordToolSearchPayload.matches[0]?.name !== "moegirl_search") {
+      throw new Error("Tool keyword-search route did not rank curated persona search hints first");
+    }
+
+    const missingToolSearchResponse = await authedRequest("/api/search/tools/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: "+not-a-real-capability web",
+        maxResults: 2
+      })
+    });
+    if (!missingToolSearchResponse.ok) {
+      throw new Error(`Tool required-term search route failed with ${missingToolSearchResponse.status}: ${await missingToolSearchResponse.text()}`);
+    }
+    const missingToolSearchPayload = (await missingToolSearchResponse.json()) as BootToolSearchResponse;
+    if (missingToolSearchPayload.matches.length !== 0) {
+      throw new Error("Tool required-term search should return no matches when required terms are absent");
     }
 
     const searchResponse = await authedRequest("/api/search", {

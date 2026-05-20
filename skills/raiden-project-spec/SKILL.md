@@ -13,11 +13,12 @@ Use this skill for cross-package changes where behavior must stay aligned betwee
 - Panel should consume server routes through `hono/client` and `AppType`, not duplicate response types by hand.
 - Shared DTO/schema definitions belong in `packages/shared/src/schemas.ts` when used by more than one package.
 - Persona and AI boot behavior belong in `packages/shared/src/persona.ts` and `packages/shared/src/boot.ts`.
+- Cross-entry conversation orchestration belongs in `packages/boot/src/index.ts`.
 - Long-term memory persistence and search belong in `packages/database`.
 
 ## Conversation Pipeline
 
-Expected flow:
+Expected flow, implemented through `packages/boot` so bot and server do not drift:
 
 1. Upsert Telegram/user identity.
 2. Save user message.
@@ -29,7 +30,7 @@ Expected flow:
 8. Summarize durable memory when useful.
 9. Embed and save new memory.
 
-If bot and server both need the same behavior, move shared orchestration down instead of letting implementations drift.
+If bot and server both need the same behavior, move orchestration into `packages/boot` or lower shared/database packages instead of letting implementations drift.
 
 ## Database Rules
 
@@ -53,7 +54,8 @@ If bot and server both need the same behavior, move shared orchestration down in
 
 ## Validation Matrix
 
-- Shared schema/persona/boot: `pnpm --filter @raiden/shared check`
+- Shared schema/persona/AI client: `pnpm --filter @raiden/shared check`
+- Conversation orchestration: `pnpm --filter @raiden/boot check`
 - Database schema/repository: `pnpm --filter @raiden/database check` and `pnpm db:generate`
 - Hono API: `pnpm --filter @raiden/server check`
 - Bot behavior: `pnpm --filter @raiden/bot check`
@@ -68,4 +70,3 @@ Final answers for cross-package work should mention:
 - Whether env vars or migrations changed
 - Validation commands run
 - Any local service limitation, such as missing Docker/PostgreSQL
-

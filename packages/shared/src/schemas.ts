@@ -10,6 +10,15 @@ export const bootSearchProviderSchema = z.enum(["disabled", "tavily", "brave", "
 export const bootSearchDepthSchema = z.enum(["basic", "advanced"]);
 export const bootSearchChannelSchema = z.enum(["google", "wikipedia", "moegirl"]);
 export const bootSearchPipelineStatusSchema = z.enum(["completed", "partial"]);
+export const bootToolExposureSchema = z.enum(["direct", "deferred"]);
+export const bootToolCapabilitySchema = z.enum([
+  "router",
+  "web",
+  "knowledge",
+  "persona_context",
+  "provider_specific",
+  "fallback_safe"
+]);
 
 const emptyStringToNull = (value: unknown) => (value === "" ? null : value);
 const optionalNullableUrlSchema = z.preprocess(emptyStringToNull, z.string().trim().url().nullable().optional());
@@ -199,6 +208,35 @@ export const webSearchResponseSchema = z.object({
   results: z.array(webSearchResultSchema)
 });
 
+export const bootToolDescriptorSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  exposure: bootToolExposureSchema,
+  searchHint: z.string(),
+  capabilities: z.array(bootToolCapabilitySchema),
+  channels: z.array(bootSearchChannelSchema).default([]),
+  readOnly: z.boolean(),
+  destructive: z.boolean(),
+  concurrencySafe: z.boolean(),
+  maxResultCount: z.number().int().min(1),
+  resultBudgetChars: z.number().int().min(1)
+});
+
+export const bootToolSearchRequestSchema = z.object({
+  query: z.string().trim().min(1).max(160),
+  maxResults: z.number().int().min(1).max(10).default(5)
+});
+
+export const bootToolSearchMatchSchema = bootToolDescriptorSchema.extend({
+  score: z.number()
+});
+
+export const bootToolSearchResponseSchema = z.object({
+  query: z.string(),
+  totalTools: z.number().int().min(0),
+  matches: z.array(bootToolSearchMatchSchema)
+});
+
 export const createMemoryRequestSchema = z.object({
   telegramUserId: z.string().min(1),
   summary: z.string().min(1).max(2000),
@@ -293,6 +331,8 @@ export type BootSearchProviderName = z.infer<typeof bootSearchProviderSchema>;
 export type BootSearchDepth = z.infer<typeof bootSearchDepthSchema>;
 export type BootSearchChannel = z.infer<typeof bootSearchChannelSchema>;
 export type BootSearchPipelineStatus = z.infer<typeof bootSearchPipelineStatusSchema>;
+export type BootToolExposure = z.infer<typeof bootToolExposureSchema>;
+export type BootToolCapability = z.infer<typeof bootToolCapabilitySchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 export type LoginResponse = z.infer<typeof loginResponseSchema>;
 export type AuthMeResponse = z.infer<typeof authMeResponseSchema>;
@@ -316,6 +356,9 @@ export type ImageGenerationResponse = z.infer<typeof imageGenerationResponseSche
 export type WebSearchRequest = z.infer<typeof webSearchRequestSchema>;
 export type WebSearchResult = z.infer<typeof webSearchResultSchema>;
 export type WebSearchResponse = z.infer<typeof webSearchResponseSchema>;
+export type BootToolDescriptor = z.infer<typeof bootToolDescriptorSchema>;
+export type BootToolSearchRequest = z.infer<typeof bootToolSearchRequestSchema>;
+export type BootToolSearchResponse = z.infer<typeof bootToolSearchResponseSchema>;
 export type CreateMemoryRequest = z.infer<typeof createMemoryRequestSchema>;
 export type SystemStatus = z.infer<typeof systemStatusSchema>;
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;

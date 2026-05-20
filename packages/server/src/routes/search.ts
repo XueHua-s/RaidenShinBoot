@@ -1,8 +1,8 @@
 import { zValidator } from "@hono/zod-validator";
 import { getEffectiveBootSearchConfig } from "@raiden/boot";
-import { webSearchRequestSchema } from "@raiden/shared";
+import { bootToolSearchRequestSchema, webSearchRequestSchema } from "@raiden/shared";
 import { formatBootSearchError, getBootSearchErrorStatus } from "@raiden/shared/search";
-import { executeBootTool, listBootTools } from "@raiden/shared/tools";
+import { executeBootTool, listBootTools, searchBootTools } from "@raiden/shared/tools";
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { requirePermission, type AuthVariables } from "../auth.js";
@@ -11,6 +11,10 @@ export const searchRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/tools", (c) => {
     requirePermission(c, "system:read");
     return c.json({ tools: listBootTools() });
+  })
+  .post("/tools/search", zValidator("json", bootToolSearchRequestSchema), (c) => {
+    requirePermission(c, "system:read");
+    return c.json(searchBootTools(c.req.valid("json")));
   })
   .post("/", zValidator("json", webSearchRequestSchema), async (c) => {
     requirePermission(c, "conversation:write");

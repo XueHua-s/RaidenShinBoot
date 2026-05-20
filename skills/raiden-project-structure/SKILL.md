@@ -15,6 +15,9 @@ Use this skill before making structural decisions, adding dependencies, or choos
 - `packages/database`
   - Owns Drizzle schema, PostgreSQL client, repositories, migrations, `pgvector` `halfvec(3072)`, and HNSW memory search.
   - Schema changes start in `src/schema.ts`, then run `pnpm db:generate`.
+- `packages/boot`
+  - Owns cross-entry conversation orchestration: user identity, message persistence, embeddings, memory search, web search, Makoto reply generation, and durable memory creation.
+  - Server and bot should call boot behavior instead of duplicating the chat pipeline.
 - `packages/server`
   - Owns Hono app, route composition, CORS/logging, `AppType` export, and HTTP orchestration.
   - Frontend type inference flows through `packages/server/src/app.ts`.
@@ -28,6 +31,7 @@ Use this skill before making structural decisions, adding dependencies, or choos
 ## Dependency Placement
 
 - Cross-package DTOs, persona text, and schemas: `packages/shared`.
+- Conversation orchestration shared by server and bot: `packages/boot`.
 - Database schema/query logic: `packages/database`.
 - HTTP-only validation and route composition: `packages/server`.
 - Telegram-only commands, messages, and grammY middleware: `packages/bot`.
@@ -43,6 +47,7 @@ Do not add a dependency to the root unless it is a build/dev tool used across pa
 - Bot conversation adapter: `packages/bot/src/conversation.ts`
 - Shared AI boot client: `packages/shared/src/boot.ts`
 - Persona prompt: `packages/shared/src/persona.ts`
+- Boot conversation orchestration: `packages/boot/src/index.ts`
 - Database schema: `packages/database/src/schema.ts`
 - Panel app: `packages/panel/src/App.tsx`
 - Panel typed client: `packages/panel/src/lib/apiClient.ts`
@@ -53,6 +58,7 @@ Do not add a dependency to the root unless it is a build/dev tool used across pa
 - Install: `pnpm install`
 - Full type check: `pnpm check`
 - Full build: `pnpm build`
+- Boot only: `pnpm --filter @raiden/boot check`
 - Server dev: `pnpm dev:server`
 - Bot dev: `pnpm dev:bot`
 - Panel dev: `pnpm dev:panel`
@@ -77,4 +83,3 @@ rg --files packages .agents .claude skills | sort
 ```
 
 Then choose the smallest package and validation command that covers the change.
-
