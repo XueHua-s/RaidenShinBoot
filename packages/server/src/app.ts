@@ -15,6 +15,7 @@ import { messagesRoute } from "./routes/messages.js";
 import { searchRoute } from "./routes/search.js";
 import { healthStatusPayload, systemRoute } from "./routes/system.js";
 import { telegramRoute } from "./routes/telegram.js";
+import { telegramWebhookRoute } from "./routes/telegram-webhook.js";
 import { usersRoute } from "./routes/users.js";
 
 function corsOrigin(origin: string) {
@@ -28,6 +29,7 @@ function corsOrigin(origin: string) {
 const api = new Hono<{ Variables: AuthVariables }>()
   .get("/health", (c) => c.json(healthStatusPayload()))
   .route("/auth", authRoute)
+  .route("/telegram/webhook", telegramWebhookRoute)
   .use("*", authMiddleware)
   .route("/admin-users", adminUsersRoute)
   .route("/admin-sessions", adminSessionsRoute)

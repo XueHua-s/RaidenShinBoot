@@ -17,6 +17,8 @@ export const chatRoute = new Hono<{ Variables: AuthVariables }>().post("/", zVal
     reply: result.reply,
     memoryCount: result.memoryCount,
     webSearchResultCount: result.webSearchResultCount,
-    webSearchStatus: result.webSearchStatus
+    webSearchStatus: result.webSearchStatus,
+    cacheStatus: result.cacheStatus,
+    cacheSimilarity: result.cacheSimilarity
   });
 });

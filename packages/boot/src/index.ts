@@ -11,6 +11,15 @@ import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import { resolveWebSearchForMessage } from "@raiden/shared/tools";
+import { enqueueMemoryEnrichment, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
+import {
+  conversationCacheScope,
+  getSemanticCacheConfig,
+  lookupConversationCache,
+  writeConversationCache,
+  type ConversationCacheHit,
+  type ConversationCacheStatus
+} from "./semantic-cache.js";
 
 let runtimeSettingsWarningEmitted = false;
 
@@ -36,6 +45,15 @@ function storageUserId(identity: BootUserIdentity) {
   }
 
   return `${identity.protocol}:${identity.userId}`;
+}
+
+function envFlag(value: string | undefined, fallback: boolean) {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  return !["0", "false", "no", "off", "disabled"].includes(normalized);
 }
 
 export async function loadRuntimeEnv() {
@@ -80,12 +98,43 @@ export async function rememberBootUser(identity: BootUserIdentity) {
 }
 
 export async function runBootConversation(input: BootConversationInput) {
-  const [bootConfig, searchConfig] = await Promise.all([getEffectiveBootConfig(), getEffectiveBootSearchConfig()]);
+  const runtimeEnv = await loadRuntimeEnv();
+  const bootConfig = getBootConfig(runtimeEnv);
+  const searchConfig = getBootSearchConfig(runtimeEnv);
+  const semanticCacheConfig = getSemanticCacheConfig(runtimeEnv);
   const userId = storageUserId(input);
+  const cacheScope = conversationCacheScope({ protocol: input.protocol, userId: input.userId });
 
   await rememberBootUser(input);
 
+  const exactCache = await lookupConversationCache({
+    scope: cacheScope,
+    content: input.content,
+    config: semanticCacheConfig
+  });
+  if (exactCache.status === "l1_hit") {
+    return saveCachedReply({
+      input,
+      userId,
+      hit: exactCache
+    });
+  }
+
   const queryEmbedding = await embedText(input.content, bootConfig);
+  const semanticCache = await lookupConversationCache({
+    scope: cacheScope,
+    content: input.content,
+    embedding: queryEmbedding,
+    config: semanticCacheConfig
+  });
+  if (semanticCache.status === "l2_hit") {
+    return saveCachedReply({
+      input,
+      userId,
+      hit: semanticCache
+    });
+  }
+
   let memories = await searchMemories({
     telegramUserId: userId,
     embedding: queryEmbedding,
@@ -111,7 +160,7 @@ export async function runBootConversation(input: BootConversationInput) {
     webSearch: webSearch.response,
     webSearchError: webSearch.error,
     config: bootConfig,
-    history: recentMessages.map((message) => ({
+    history: recentMessages.map((message: { role: string; content: string }) => ({
       role: message.role as "user" | "assistant" | "system",
       content: message.content
     }))
@@ -124,7 +173,7 @@ export async function runBootConversation(input: BootConversationInput) {
     assistantContent: reply
   });
 
-  await createDurableMemoryIfUseful({
+  await scheduleDurableMemoryIfUseful({
     userId,
     displayName,
     content: input.content,
@@ -132,15 +181,85 @@ export async function runBootConversation(input: BootConversationInput) {
     sourceMessageId: userMessage.id,
     bootConfig
   });
+  void writeConversationCache({
+    scope: cacheScope,
+    content: input.content,
+    reply,
+    embedding: queryEmbedding,
+    model: bootConfig.BOOT_CHAT_MODEL,
+    config: semanticCacheConfig
+  }).then((result) => {
+    if (result.status === "write_failed") {
+      console.warn("Semantic cache write failed.", result.reason);
+    }
+  });
 
   return {
     reply,
     memoryCount: memories.length,
     webSearchResultCount: webSearch.response?.results.length ?? 0,
     webSearchStatus: webSearch.status,
+    cacheStatus: "miss" satisfies ConversationCacheStatus,
+    cacheSimilarity: null,
     userMessageId: userMessage.id,
     assistantMessageId: assistantMessage.id
   };
+}
+
+async function saveCachedReply(input: {
+  input: BootConversationInput;
+  userId: string;
+  hit: ConversationCacheHit;
+}) {
+  const { userMessage, assistantMessage } = await saveConversationTurn({
+    telegramUserId: input.userId,
+    telegramMessageId: input.input.sourceMessageId ?? null,
+    userContent: input.input.content,
+    assistantContent: input.hit.reply
+  });
+
+  return {
+    reply: input.hit.reply,
+    memoryCount: 0,
+    webSearchResultCount: 0,
+    webSearchStatus: "skipped" as const,
+    cacheStatus: input.hit.status,
+    cacheSimilarity: input.hit.similarity,
+    userMessageId: userMessage.id,
+    assistantMessageId: assistantMessage.id
+  };
+}
+
+async function scheduleDurableMemoryIfUseful(
+  input: MemoryEnrichmentJob & {
+    bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
+  }
+) {
+  const jobInput: MemoryEnrichmentJob = {
+    userId: input.userId,
+    displayName: input.displayName,
+    content: input.content,
+    reply: input.reply,
+    sourceMessageId: input.sourceMessageId
+  };
+
+  if (isBootQueueConfigured() && envFlag(process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED, false)) {
+    try {
+      await enqueueMemoryEnrichment(jobInput);
+      return;
+    } catch (error) {
+      console.warn("Memory enrichment enqueue failed; falling back to background inline task.", error instanceof Error ? error.message : error);
+      void createDurableMemoryIfUseful(input).catch((backgroundError) => {
+        console.warn(
+          "Background durable memory creation failed after enqueue fallback.",
+          backgroundError instanceof Error ? backgroundError.message : backgroundError
+        );
+      });
+      return;
+    }
+  }
+
+  await createDurableMemoryIfUseful(input);
 }
 
 async function createDurableMemoryIfUseful(input: {
@@ -176,6 +295,13 @@ async function createDurableMemoryIfUseful(input: {
   }
 }
 
+export async function processMemoryEnrichmentJob(input: MemoryEnrichmentJob) {
+  await createDurableMemoryIfUseful({
+    ...input,
+    bootConfig: await getEffectiveBootConfig()
+  });
+}
+
 export async function recallBootMemories(input: BootUserIdentity & { query: string; limit?: number }) {
   const embedding = await embedText(input.query, await getEffectiveBootConfig());
   return searchMemories({
@@ -192,3 +318,6 @@ export async function listBootMemories(input: BootUserIdentity & { limit?: numbe
     offset: input.offset ?? 0
   });
 }
+
+export * from "./jobs.js";
+export * from "./semantic-cache.js";

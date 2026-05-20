@@ -6,12 +6,15 @@
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts --deps.never-bundle postgres --deps.never-bundle drizzle-orm",
+    "build": "tsdown src/index.ts src/worker.ts --format esm --dts --deps.never-bundle postgres --deps.never-bundle drizzle-orm",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx --conditions=source src/index.ts",
+    "dev:worker": "tsx --conditions=source src/worker.ts",
+    "start:worker": "node dist/worker.mjs",
     "start": "node dist/index.mjs"
   },
   "dependencies": {
+    "@grammyjs/runner": "^2.0.3",
     "@raiden/boot": "workspace:*",
     "@raiden/shared": "workspace:*",
     "dotenv": "^17.2.3",

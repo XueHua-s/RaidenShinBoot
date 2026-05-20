@@ -82,6 +82,8 @@ async function main() {
   process.env.BOOT_EMBEDDING_TIMEOUT_MS = "30000";
   process.env.BOOT_IMAGE_TIMEOUT_MS = "180000";
   process.env.BOOT_SEARCH_TIMEOUT_MS = "15000";
+  process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED = "false";
+  process.env.BOOT_SEMANTIC_CACHE_ENABLED = "false";
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));

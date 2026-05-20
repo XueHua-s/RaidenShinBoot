@@ -16,6 +16,19 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: raiden-shin-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - raiden_shin_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   migrate:
     build:
       context: .
@@ -42,10 +55,13 @@ services:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8787
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+      REDIS_URL: redis://redis:6379
     ports:
       - "${SERVER_PORT:-8787}:8787"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -73,13 +89,38 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+      REDIS_URL: redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     profiles:
       - bot
 
+  bot-worker:
+    build:
+      context: .
+      dockerfile: packages/bot/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+      REDIS_URL: redis://redis:6379
+      BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED: "true"
+    command: ["pnpm", "--filter", "@raiden/bot", "start:worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - worker
+
 volumes:
   raiden_shin_postgres:
+  raiden_shin_redis:
