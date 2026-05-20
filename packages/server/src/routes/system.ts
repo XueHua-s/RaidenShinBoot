@@ -1,10 +1,10 @@
 import {
-  deleteRuntimeSetting,
+  applyRuntimeSettingsChanges,
   encryptRuntimeSettingValue,
   getRuntimeSettingsEnvOverrides,
   isRuntimeSettingsSecretStorageReady,
   listRuntimeSettings,
-  upsertRuntimeSetting
+  type NewRuntimeSetting
 } from "@raiden/database";
 import { updateRuntimeSettingsRequestSchema, type RuntimeSettings } from "@raiden/shared";
 import { getBootConfig } from "@raiden/shared/boot";
@@ -181,24 +181,24 @@ export async function systemStatusPayload() {
   };
 }
 
-async function persistPublicSetting(key: string, value: string | number | null, updatedByAdminId: string) {
+function publicSettingChange(key: string, value: string | number | null, updatedByAdminId: string) {
   if (value === null) {
-    await deleteRuntimeSetting(key);
-    return;
+    return { deleteKey: key };
   }
 
-  await upsertRuntimeSetting({
-    key,
-    value: String(value),
-    encrypted: false,
-    updatedByAdminId
-  });
+  return {
+    upsert: {
+      key,
+      value: String(value),
+      encrypted: false,
+      updatedByAdminId
+    } satisfies NewRuntimeSetting
+  };
 }
 
-async function persistSecretSetting(key: string, value: string | null, updatedByAdminId: string) {
+function secretSettingChange(key: string, value: string | null, updatedByAdminId: string) {
   if (value === null) {
-    await deleteRuntimeSetting(key);
-    return;
+    return { deleteKey: key };
   }
 
   if (!isRuntimeSettingsSecretStorageReady()) {
@@ -207,12 +207,14 @@ async function persistSecretSetting(key: string, value: string | null, updatedBy
     });
   }
 
-  await upsertRuntimeSetting({
-    key,
-    value: encryptRuntimeSettingValue(value),
-    encrypted: true,
-    updatedByAdminId
-  });
+  return {
+    upsert: {
+      key,
+      value: encryptRuntimeSettingValue(value),
+      encrypted: true,
+      updatedByAdminId
+    } satisfies NewRuntimeSetting
+  };
 }
 
 export const systemRoute = new Hono<{ Variables: AuthVariables }>()
@@ -228,6 +230,8 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
     const admin = requirePermission(c, "system:write");
     const body = c.req.valid("json");
     const before = await buildRuntimeSettingsPayload();
+    const deletes: string[] = [];
+    const upserts: NewRuntimeSetting[] = [];
 
     for (const [field, key] of Object.entries(publicSettingFields) as Array<
       [keyof typeof publicSettingFields, (typeof publicSettingFields)[keyof typeof publicSettingFields]]
@@ -241,7 +245,12 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
         continue;
       }
 
-      await persistPublicSetting(key, value as string | number | null, admin.id);
+      const change = publicSettingChange(key, value as string | number | null, admin.id);
+      if ("deleteKey" in change) {
+        deletes.push(change.deleteKey);
+      } else {
+        upserts.push(change.upsert);
+      }
     }
 
     for (const [field, key] of Object.entries(secretSettingFields) as Array<
@@ -251,8 +260,15 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
         continue;
       }
 
-      await persistSecretSetting(key, body[field as keyof typeof body] as string | null, admin.id);
+      const change = secretSettingChange(key, body[field as keyof typeof body] as string | null, admin.id);
+      if ("deleteKey" in change) {
+        deletes.push(change.deleteKey);
+      } else {
+        upserts.push(change.upsert);
+      }
     }
+
+    await applyRuntimeSettingsChanges({ deletes, upserts });
 
     const after = await buildRuntimeSettingsPayload();
     await writeAuditFromContext(c, {

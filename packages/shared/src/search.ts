@@ -1,5 +1,6 @@
 import * as robot3Module from "robot3";
 import { z } from "zod";
+import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import type { BootSearchChannel, WebSearchRequest, WebSearchResponse, WebSearchResult } from "./schemas.js";
 
 const robot3 =
@@ -10,6 +11,7 @@ const { createMachine, interpret, invoke, reduce, state, transition } = robot3;
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
+const timeoutMs = z.coerce.number().int().min(1_000).max(120_000);
 
 const searchEnvSchema = z.object({
   BOOT_SEARCH_PROVIDER: z.enum(["disabled", "tavily", "brave", "serper"]).default("disabled"),
@@ -17,6 +19,7 @@ const searchEnvSchema = z.object({
   BOOT_SEARCH_BASE_URL: optionalUrl,
   BOOT_SEARCH_MAX_RESULTS: z.coerce.number().int().min(1).max(10).default(5),
   BOOT_SEARCH_DEPTH: z.enum(["basic", "advanced"]).default("basic"),
+  BOOT_SEARCH_TIMEOUT_MS: timeoutMs.default(15_000),
   BOOT_WIKIPEDIA_API_URL: z.string().url().default("https://zh.wikipedia.org/w/api.php"),
   BOOT_MOEGIRL_API_URL: z.string().url().default("https://zh.moegirl.org.cn/api.php")
 });
@@ -161,6 +164,7 @@ export async function searchWikipedia(input: WebSearchRequest, options: SearchWe
     maxResults,
     apiUrl: config.BOOT_WIKIPEDIA_API_URL,
     source: "wikipedia",
+    timeoutMs: config.BOOT_SEARCH_TIMEOUT_MS,
     fetchImpl: options.fetch ?? fetch
   });
   return {
@@ -181,6 +185,7 @@ export async function searchMoegirl(input: WebSearchRequest, options: SearchWebO
     maxResults,
     apiUrl: config.BOOT_MOEGIRL_API_URL,
     source: "moegirl",
+    timeoutMs: config.BOOT_SEARCH_TIMEOUT_MS,
     fetchImpl: options.fetch ?? fetch
   });
   return {
@@ -300,6 +305,7 @@ async function executeSearchChannel(channel: BootSearchChannel, plan: SearchPlan
       maxResults: plan.maxResults,
       apiUrl: context.config.BOOT_WIKIPEDIA_API_URL,
       source: "wikipedia",
+      timeoutMs: context.config.BOOT_SEARCH_TIMEOUT_MS,
       fetchImpl: context.fetchImpl
     });
   }
@@ -309,6 +315,7 @@ async function executeSearchChannel(channel: BootSearchChannel, plan: SearchPlan
     maxResults: plan.maxResults,
     apiUrl: context.config.BOOT_MOEGIRL_API_URL,
     source: "moegirl",
+    timeoutMs: context.config.BOOT_SEARCH_TIMEOUT_MS,
     fetchImpl: context.fetchImpl
   });
 }
@@ -364,7 +371,8 @@ async function tavilySearch(
         include_images: false
       })
     },
-    "Google-style search provider"
+    "Google-style search provider",
+    config.BOOT_SEARCH_TIMEOUT_MS
   );
 
   const items = arrayFrom(payload, "results");
@@ -391,7 +399,8 @@ async function braveSearch(
         "x-subscription-token": config.BOOT_SEARCH_API_KEY ?? ""
       }
     },
-    "Google-style search provider"
+    "Google-style search provider",
+    config.BOOT_SEARCH_TIMEOUT_MS
   );
 
   const web = recordFrom(payload, "web");
@@ -419,7 +428,8 @@ async function serperSearch(
         num: maxResults
       })
     },
-    "Google-style search provider"
+    "Google-style search provider",
+    config.BOOT_SEARCH_TIMEOUT_MS
   );
 
   const items = arrayFrom(payload, "organic");
@@ -431,6 +441,7 @@ async function mediaWikiSearch(input: {
   maxResults: number;
   apiUrl: string;
   source: "wikipedia" | "moegirl";
+  timeoutMs: number;
   fetchImpl: typeof fetch;
 }): Promise<WebSearchResult[]> {
   const url = new URL(input.apiUrl);
@@ -451,7 +462,8 @@ async function mediaWikiSearch(input: {
         "user-agent": "RaidenShinBoot/0.1 search-router"
       }
     },
-    input.source
+    input.source,
+    input.timeoutMs
   );
 
   if (!Array.isArray(payload)) {
@@ -461,7 +473,7 @@ async function mediaWikiSearch(input: {
   const titles = stringArray(payload[1]).slice(0, input.maxResults);
   const descriptions = stringArray(payload[2]);
   const urls = stringArray(payload[3]);
-  const extracts = await fetchMediaWikiExtracts(input.fetchImpl, input.apiUrl, titles, input.source);
+  const extracts = await fetchMediaWikiExtracts(input.fetchImpl, input.apiUrl, titles, input.source, input.timeoutMs);
 
   return titles
     .map((title, index) => {
@@ -484,7 +496,8 @@ async function fetchMediaWikiExtracts(
   fetchImpl: typeof fetch,
   apiUrl: string,
   titles: string[],
-  source: "wikipedia" | "moegirl"
+  source: "wikipedia" | "moegirl",
+  timeoutMsValue: number
 ) {
   const extracts = new Map<string, string>();
   if (titles.length === 0) {
@@ -512,7 +525,8 @@ async function fetchMediaWikiExtracts(
           "user-agent": "RaidenShinBoot/0.1 search-router"
         }
       },
-      source
+      source,
+      timeoutMsValue
     );
     const pages = recordFrom(recordFrom(payload, "query"), "pages");
     for (const value of Object.values(pages ?? {})) {
@@ -533,9 +547,30 @@ async function fetchMediaWikiExtracts(
   return extracts;
 }
 
-async function fetchJson(fetchImpl: typeof fetch, url: URL, init: RequestInit, source: string) {
-  const response = await fetchImpl(url, init);
-  const text = await response.text();
+async function fetchJson(fetchImpl: typeof fetch, url: URL, init: RequestInit, source: string, timeoutMsValue: number) {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      ...init,
+      signal: timeoutSignal(timeoutMsValue)
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootSearchError("search_provider_failed", `${source} timed out after ${timeoutMsValue}ms.`, 504);
+    }
+    throw new BootSearchError("search_provider_failed", `${source} request failed: ${errorMessage(error)}`, 502);
+  }
+
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootSearchError("search_provider_failed", `${source} response body timed out after ${timeoutMsValue}ms.`, 504);
+    }
+    throw new BootSearchError("search_provider_failed", `${source} response body failed: ${errorMessage(error)}`, 502);
+  }
+
   if (!response.ok) {
     throw new BootSearchError("search_provider_failed", `${source} failed with HTTP ${response.status}.`, 502);
   }

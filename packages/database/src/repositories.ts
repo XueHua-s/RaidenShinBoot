@@ -44,6 +44,11 @@ export type MemorySearchHit = {
   score: number;
 };
 
+export type RuntimeSettingsChangeSet = {
+  deletes?: string[];
+  upserts?: NewRuntimeSetting[];
+};
+
 const defaultPagination = {
   limit: 20,
   offset: 0
@@ -204,6 +209,60 @@ export async function updateAdminUser(
     .returning();
 
   return user ?? null;
+}
+
+export async function updateAdminUserWithSuperAdminGuard(
+  id: string,
+  input: Partial<Pick<AdminUser, "displayName" | "passwordHash" | "role" | "status">>
+) {
+  const db = getDatabase();
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(918273645)`);
+
+    const [before] = await tx.select().from(adminUsers).where(eq(adminUsers.id, id)).limit(1);
+    if (!before) {
+      return {
+        before: null,
+        after: null,
+        blockedLastActiveSuperAdmin: false
+      };
+    }
+
+    const wouldLoseActiveSuperAdmin =
+      before.role === "super_admin" &&
+      before.status === "active" &&
+      ((input.role !== undefined && input.role !== "super_admin") || input.status === "disabled");
+    if (wouldLoseActiveSuperAdmin) {
+      const [row] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(adminUsers)
+        .where(and(eq(adminUsers.role, "super_admin"), eq(adminUsers.status, "active")));
+
+      if ((row?.count ?? 0) <= 1) {
+        return {
+          before,
+          after: null,
+          blockedLastActiveSuperAdmin: true
+        };
+      }
+    }
+
+    const [after] = await tx
+      .update(adminUsers)
+      .set({
+        ...input,
+        updatedAt: new Date()
+      })
+      .where(eq(adminUsers.id, id))
+      .returning();
+
+    return {
+      before,
+      after: after ?? null,
+      blockedLastActiveSuperAdmin: false
+    };
+  });
 }
 
 export async function markAdminLogin(id: string) {
@@ -391,6 +450,33 @@ export async function upsertRuntimeSetting(input: NewRuntimeSetting) {
   }
 
   return row;
+}
+
+export async function applyRuntimeSettingsChanges(input: RuntimeSettingsChangeSet) {
+  const db = getDatabase();
+  const deletes = Array.from(new Set(input.deletes ?? []));
+  const upserts = input.upserts ?? [];
+
+  await db.transaction(async (tx) => {
+    for (const key of deletes) {
+      await tx.delete(runtimeSettings).where(eq(runtimeSettings.key, key));
+    }
+
+    for (const setting of upserts) {
+      await tx
+        .insert(runtimeSettings)
+        .values(setting)
+        .onConflictDoUpdate({
+          target: runtimeSettings.key,
+          set: {
+            value: setting.value ?? null,
+            encrypted: setting.encrypted ?? false,
+            updatedByAdminId: setting.updatedByAdminId ?? null,
+            updatedAt: new Date()
+          }
+        });
+    }
+  });
 }
 
 export async function deleteRuntimeSetting(key: string) {
@@ -696,6 +782,69 @@ export async function saveMessage(input: Omit<NewMessage, "conversationId"> & { 
   }
 
   return message;
+}
+
+export async function saveConversationTurn(input: {
+  telegramUserId: string;
+  telegramMessageId?: number | null;
+  userContent: string;
+  assistantContent: string;
+}) {
+  const db = getDatabase();
+
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.telegramUserId, input.telegramUserId))
+      .orderBy(desc(conversations.updatedAt))
+      .limit(1);
+
+    const conversation =
+      existing ??
+      (
+        await tx
+          .insert(conversations)
+          .values({ telegramUserId: input.telegramUserId })
+          .returning()
+      )[0];
+
+    if (!conversation) {
+      throw new Error("Failed to create conversation");
+    }
+
+    const [userMessage] = await tx
+      .insert(messages)
+      .values({
+        conversationId: conversation.id,
+        telegramUserId: input.telegramUserId,
+        telegramMessageId: input.telegramMessageId ?? null,
+        role: "user",
+        content: input.userContent
+      })
+      .returning();
+    const [assistantMessage] = await tx
+      .insert(messages)
+      .values({
+        conversationId: conversation.id,
+        telegramUserId: input.telegramUserId,
+        role: "assistant",
+        content: input.assistantContent
+      })
+      .returning();
+
+    if (!userMessage || !assistantMessage) {
+      throw new Error("Failed to save conversation turn");
+    }
+
+    await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, conversation.id));
+
+    return {
+      conversation,
+      userMessage,
+      assistantMessage
+    };
+  });
 }
 
 export async function listMessages(input: PaginationInput & { telegramUserId?: string | undefined } = defaultPagination) {

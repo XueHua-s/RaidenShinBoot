@@ -6,7 +6,7 @@
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts",
+    "build": "tsdown src/index.ts --format esm --dts --deps.never-bundle postgres --deps.never-bundle drizzle-orm",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx --conditions=source src/index.ts",
     "start": "node dist/index.mjs"
@@ -21,5 +21,10 @@
   "devDependencies": {
     "@types/node": "^22.18.12",
     "typescript": "^5.9.3"
+  },
+  "tsdown": {
+    "deps": {
+      "onlyBundle": false
+    }
   }
 }

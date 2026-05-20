@@ -1,12 +1,14 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { embed, generateImage } from "ai";
 import { z } from "zod";
+import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
 import type { WebSearchResponse } from "./schemas.js";
 import { formatWebSearchResultsForPrompt } from "./tools.js";
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
+const timeoutMs = z.coerce.number().int().min(1_000).max(600_000);
 
 const bootEnvSchema = z.object({
   BOOT_BASE_URL: z.string().url().default("https://proxy.xhblog.top:3000/v1"),
@@ -19,7 +21,10 @@ const bootEnvSchema = z.object({
   BOOT_CHAT_MODEL: z.string().default("gpt-5.5"),
   BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large"),
   BOOT_IMAGE_BASE_URL: optionalUrl,
-  BOOT_IMAGE_MODEL: z.string().default("gpt-image-1")
+  BOOT_IMAGE_MODEL: z.string().default("gpt-image-1"),
+  BOOT_CHAT_TIMEOUT_MS: timeoutMs.default(90_000),
+  BOOT_EMBEDDING_TIMEOUT_MS: timeoutMs.default(30_000),
+  BOOT_IMAGE_TIMEOUT_MS: timeoutMs.default(180_000)
 });
 
 export type BootConfig = z.infer<typeof bootEnvSchema>;
@@ -92,56 +97,113 @@ async function generateStreamedText(input: { system: string; prompt: string; con
 }
 
 async function generateChatCompletionsText(input: { system: string; prompt: string; config: BootConfig }) {
-  const response = await fetch(joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/chat/completions"), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
-      "content-type": "application/json",
-      accept: "text/event-stream"
+  const response = await fetchProvider(
+    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/chat/completions"),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
+        "content-type": "application/json",
+        accept: "text/event-stream"
+      },
+      body: JSON.stringify({
+        model: input.config.BOOT_CHAT_MODEL,
+        stream: true,
+        messages: [
+          { role: "system", content: input.system },
+          { role: "user", content: input.prompt }
+        ]
+      })
     },
-    body: JSON.stringify({
-      model: input.config.BOOT_CHAT_MODEL,
-      stream: true,
-      messages: [
-        { role: "system", content: input.system },
-        { role: "user", content: input.prompt }
-      ]
-    })
-  });
+    input.config.BOOT_CHAT_TIMEOUT_MS,
+    "AI relay chat completions"
+  );
 
   if (!response.ok) {
-    throw chatProviderError(response.status, await response.text());
+    throw chatProviderError(
+      response.status,
+      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions")
+    );
   }
 
-  return readStreamedText(response, parseChatStreamEvent);
+  return readProviderStream(response, parseChatStreamEvent, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions");
 }
 
 async function generateResponsesText(input: { system: string; prompt: string; config: BootConfig }) {
-  const response = await fetch(joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/responses"), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
-      "content-type": "application/json",
-      accept: "text/event-stream"
+  const response = await fetchProvider(
+    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/responses"),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
+        "content-type": "application/json",
+        accept: "text/event-stream"
+      },
+      body: JSON.stringify({
+        model: input.config.BOOT_CHAT_MODEL,
+        stream: true,
+        instructions: input.system,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: input.prompt }]
+          }
+        ]
+      })
     },
-    body: JSON.stringify({
-      model: input.config.BOOT_CHAT_MODEL,
-      stream: true,
-      instructions: input.system,
-      input: [
-        {
-          role: "user",
-          content: [{ type: "input_text", text: input.prompt }]
-        }
-      ]
-    })
-  });
+    input.config.BOOT_CHAT_TIMEOUT_MS,
+    "AI relay Responses"
+  );
 
   if (!response.ok) {
-    throw chatProviderError(response.status, await response.text());
+    throw chatProviderError(
+      response.status,
+      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses")
+    );
   }
 
-  return readStreamedText(response, parseResponsesStreamEvent);
+  return readProviderStream(response, parseResponsesStreamEvent, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses");
+}
+
+async function fetchProvider(url: URL, init: RequestInit, timeoutMsValue: number, source: string) {
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: timeoutSignal(timeoutMsValue)
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootProviderError(`${source} timed out after ${timeoutMsValue}ms.`, 504);
+    }
+    throw new BootProviderError(`${source} request failed: ${errorMessage(error)}`, 502);
+  }
+}
+
+async function readProviderStream(
+  response: Response,
+  parseEvent: (event: string) => string,
+  timeoutMsValue: number,
+  source: string
+) {
+  try {
+    return await readStreamedText(response, parseEvent);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootProviderError(`${source} stream timed out after ${timeoutMsValue}ms.`, 504);
+    }
+    throw error;
+  }
+}
+
+async function readProviderText(response: Response, timeoutMsValue: number, source: string) {
+  try {
+    return await response.text();
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootProviderError(`${source} response body timed out after ${timeoutMsValue}ms.`, 504);
+    }
+    throw new BootProviderError(`${source} response body failed: ${errorMessage(error)}`, 502);
+  }
 }
 
 async function readStreamedText(response: Response, parseEvent: (event: string) => string) {
@@ -276,10 +338,19 @@ function joinUrl(baseUrl: string, path: string) {
 
 export async function embedText(value: string, config = getBootConfig()): Promise<number[]> {
   const provider = createEmbeddingProvider(config);
-  const result = await embed({
-    model: provider.embedding(config.BOOT_EMBEDDING_MODEL),
-    value
-  });
+  let result: Awaited<ReturnType<typeof embed>>;
+  try {
+    result = await embed({
+      model: provider.embedding(config.BOOT_EMBEDDING_MODEL),
+      value,
+      abortSignal: timeoutSignal(config.BOOT_EMBEDDING_TIMEOUT_MS)
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootProviderError(`AI relay embedding timed out after ${config.BOOT_EMBEDDING_TIMEOUT_MS}ms.`, 504);
+    }
+    throw new BootProviderError(`AI relay embedding failed: ${errorMessage(error)}`, 502);
+  }
 
   if (result.embedding.length !== 3072) {
     throw new Error(
@@ -363,16 +434,25 @@ export async function generateMakotoImage(input: {
 }) {
   const config = input.config ?? getBootConfig();
   const provider = createImageProvider(config);
-  const result = await generateImage({
-    model: provider.imageModel(config.BOOT_IMAGE_MODEL),
-    prompt: [
-      "Use a gentle, elegant visual mood inspired by Raiden Makoto: soft lightning, sakura, quiet Inazuma atmosphere, humane warmth.",
-      "Do not include text, logos, watermarks, UI chrome, or official game screenshots.",
-      `User image request: ${input.prompt}`
-    ].join("\n"),
-    n: input.n ?? 1,
-    size: input.size ?? "1024x1024"
-  });
+  let result: Awaited<ReturnType<typeof generateImage>>;
+  try {
+    result = await generateImage({
+      model: provider.imageModel(config.BOOT_IMAGE_MODEL),
+      prompt: [
+        "Use a gentle, elegant visual mood inspired by Raiden Makoto: soft lightning, sakura, quiet Inazuma atmosphere, humane warmth.",
+        "Do not include text, logos, watermarks, UI chrome, or official game screenshots.",
+        `User image request: ${input.prompt}`
+      ].join("\n"),
+      n: input.n ?? 1,
+      size: input.size ?? "1024x1024",
+      abortSignal: timeoutSignal(config.BOOT_IMAGE_TIMEOUT_MS)
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new BootProviderError(`AI relay image generation timed out after ${config.BOOT_IMAGE_TIMEOUT_MS}ms.`, 504);
+    }
+    throw new BootProviderError(`AI relay image generation failed: ${errorMessage(error)}`, 502);
+  }
 
   return {
     images: result.images.map((image) => ({

@@ -1,6 +1,7 @@
 import {
   closeDatabase,
   createAdminUser,
+  countActiveSuperAdmins,
   deleteRuntimeSetting,
   getSqlClient,
   listRuntimeSettings,
@@ -52,7 +53,11 @@ async function main() {
     "BOOT_IMAGE_MODEL",
     "BOOT_SEARCH_PROVIDER",
     "BOOT_SEARCH_MAX_RESULTS",
-    "BOOT_SEARCH_DEPTH"
+    "BOOT_SEARCH_DEPTH",
+    "BOOT_CHAT_TIMEOUT_MS",
+    "BOOT_EMBEDDING_TIMEOUT_MS",
+    "BOOT_IMAGE_TIMEOUT_MS",
+    "BOOT_SEARCH_TIMEOUT_MS"
   ];
   const runtimeSettingsSnapshot = (await listRuntimeSettings()).filter((setting) =>
     runtimeSettingKeys.includes(setting.key)
@@ -73,6 +78,10 @@ async function main() {
   process.env.BOOT_MOEGIRL_API_URL = `http://127.0.0.1:${port}/moegirl/api.php`;
   process.env.BOOT_SEARCH_API_KEY = "e2e-local-search-key";
   process.env.BOOT_SEARCH_MAX_RESULTS = "5";
+  process.env.BOOT_CHAT_TIMEOUT_MS = "90000";
+  process.env.BOOT_EMBEDDING_TIMEOUT_MS = "30000";
+  process.env.BOOT_IMAGE_TIMEOUT_MS = "180000";
+  process.env.BOOT_SEARCH_TIMEOUT_MS = "15000";
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
@@ -100,8 +109,8 @@ async function main() {
       throw new Error(`Admin login failed with ${loginResponse.status}: ${await loginResponse.text()}`);
     }
     const sessionCookie = loginResponse.headers.get("set-cookie")?.split(";")[0];
-    const loginPayload = (await loginResponse.json()) as { csrfToken?: string };
-    if (!sessionCookie || !loginPayload.csrfToken) {
+    const loginPayload = (await loginResponse.json()) as { user?: { id?: string }; csrfToken?: string };
+    if (!sessionCookie || !loginPayload.csrfToken || !loginPayload.user?.id) {
       throw new Error("Admin login did not return session cookie and CSRF token");
     }
 
@@ -154,6 +163,20 @@ async function main() {
       throw new Error(`Health check failed with ${health.status}`);
     }
 
+    const lastSuperAdminGuardStatus =
+      (await countActiveSuperAdmins()) <= 1
+        ? (
+            await authedRequest(`/api/admin-users/${loginPayload.user.id}`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ status: "disabled" })
+            })
+          ).status
+        : "skipped-existing-super-admins";
+    if (lastSuperAdminGuardStatus !== "skipped-existing-super-admins" && lastSuperAdminGuardStatus !== 400) {
+      throw new Error(`Last active super admin guard should return 400, got ${lastSuperAdminGuardStatus}`);
+    }
+
     const runtimeSettings = await patchRuntimeSettings({
       gatewayPreset: "new_api",
       bootBaseUrl: `http://127.0.0.1:${port}/v1`,
@@ -179,6 +202,38 @@ async function main() {
       !runtimeSettings.data.secrets.bootSearchApiKey
     ) {
       throw new Error("Runtime settings did not persist new-api relay and secret status");
+    }
+
+    const failedAtomicSettingsResponse = await (async () => {
+      const originalSettingsEncryptionKey = process.env.BOOT_SETTINGS_ENCRYPTION_KEY;
+      process.env.BOOT_SETTINGS_ENCRYPTION_KEY = "";
+      try {
+        return await authedRequest("/api/system/settings", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bootBaseUrl: "http://127.0.0.1:1/v1",
+            bootApiKey: "should-not-persist"
+          })
+        });
+      } finally {
+        process.env.BOOT_SETTINGS_ENCRYPTION_KEY = originalSettingsEncryptionKey;
+      }
+    })();
+    if (failedAtomicSettingsResponse.status !== 400) {
+      throw new Error(`Runtime settings secret validation should fail with 400, got ${failedAtomicSettingsResponse.status}`);
+    }
+    const settingsAfterFailedAtomicPatchResponse = await authedRequest("/api/system/settings");
+    if (!settingsAfterFailedAtomicPatchResponse.ok) {
+      throw new Error(
+        `Runtime settings read after failed patch failed with ${settingsAfterFailedAtomicPatchResponse.status}: ${await settingsAfterFailedAtomicPatchResponse.text()}`
+      );
+    }
+    const settingsAfterFailedAtomicPatch = (await settingsAfterFailedAtomicPatchResponse.json()) as {
+      data?: { bootBaseUrl?: string };
+    };
+    if (settingsAfterFailedAtomicPatch.data?.bootBaseUrl !== `http://127.0.0.1:${port}/v1`) {
+      throw new Error("Runtime settings partial public change persisted after secret validation failed");
     }
 
     const firstChat = await authedRequest("/api/chat", {
@@ -465,30 +520,36 @@ async function main() {
       throw new Error("Knowledge-routed chat did not query Wikipedia and Moegirl channels");
     }
 
-    const searchQueryCountBeforeFailure = relayState.searchQueries.length;
-    const originalSearchApiKey = process.env.BOOT_SEARCH_API_KEY;
-    process.env.BOOT_SEARCH_API_KEY = "";
-    await patchRuntimeSettings({ bootSearchApiKey: null });
-    const failedSearchChat = await authedRequest("/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        telegramUserId: apiTelegramUserId,
-        username: "e2e_user",
-        content: "请联网搜索 这个配置不可用时也不要中断聊天。"
-      })
-    });
-    if (!failedSearchChat.ok) {
-      throw new Error(`Search failure fallback chat failed with ${failedSearchChat.status}: ${await failedSearchChat.text()}`);
-    }
-    const failedSearchChatPayload = (await failedSearchChat.json()) as { reply?: string; webSearchStatus?: string };
-    if (!failedSearchChatPayload.reply || failedSearchChatPayload.webSearchStatus !== "failed") {
-      throw new Error("Search failure fallback chat did not report a failed web search state");
-    }
-    if (relayState.searchQueries.length !== searchQueryCountBeforeFailure) {
-      throw new Error("Search failure fallback should not call the provider when the key is missing");
-    }
-    process.env.BOOT_SEARCH_API_KEY = originalSearchApiKey;
+    const failedSearchChatStatus = await (async () => {
+      const searchQueryCountBeforeFailure = relayState.searchQueries.length;
+      const originalSearchApiKey = process.env.BOOT_SEARCH_API_KEY;
+      process.env.BOOT_SEARCH_API_KEY = "";
+      try {
+        await patchRuntimeSettings({ bootSearchApiKey: null });
+        const failedSearchChat = await authedRequest("/api/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            telegramUserId: apiTelegramUserId,
+            username: "e2e_user",
+            content: "请联网搜索 这个配置不可用时也不要中断聊天。"
+          })
+        });
+        if (!failedSearchChat.ok) {
+          throw new Error(`Search failure fallback chat failed with ${failedSearchChat.status}: ${await failedSearchChat.text()}`);
+        }
+        const failedSearchChatPayload = (await failedSearchChat.json()) as { reply?: string; webSearchStatus?: string };
+        if (!failedSearchChatPayload.reply || failedSearchChatPayload.webSearchStatus !== "failed") {
+          throw new Error("Search failure fallback chat did not report a failed web search state");
+        }
+        if (relayState.searchQueries.length !== searchQueryCountBeforeFailure) {
+          throw new Error("Search failure fallback should not call the provider when the key is missing");
+        }
+        return failedSearchChatPayload.webSearchStatus;
+      } finally {
+        process.env.BOOT_SEARCH_API_KEY = originalSearchApiKey;
+      }
+    })();
     await patchRuntimeSettings({ bootSearchApiKey: "e2e-local-search-key" });
 
     const responseFallbackFailuresBefore = relayState.chatCompletionFailures;
@@ -561,10 +622,12 @@ async function main() {
           wikipediaQueryCount: relayState.wikipediaQueries.length,
           moegirlQueryCount: relayState.moegirlQueries.length,
           disabledSearchStatus: disabledSearchResponse.status,
-          failedSearchChatStatus: failedSearchChatPayload.webSearchStatus,
+          failedSearchChatStatus,
           chatCompletionFailures: relayState.chatCompletionFailures,
           responsesPromptCount: relayState.responsesPrompts.length,
           summaryCount: relayState.summaries.length,
+          lastSuperAdminGuardStatus,
+          atomicSettingsGuardStatus: failedAtomicSettingsResponse.status,
           pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
           approvedGroupAllowed: approvedGroupAccess.allowed,
           globalCommandBlocked: !globallyBlockedCommandAccess.allowed,

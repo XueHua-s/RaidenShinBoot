@@ -1,18 +1,26 @@
 import { zValidator } from "@hono/zod-validator";
 import {
-  countActiveSuperAdmins,
   countAdminUsers,
   createAdminUser,
-  findAdminById,
   findAdminByUsername,
   listAdminUsers,
-  updateAdminUser
+  updateAdminUserWithSuperAdminGuard
 } from "@raiden/database";
 import { createAdminUserRequestSchema, paginationQuerySchema, updateAdminUserRequestSchema } from "@raiden/shared";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { hashPassword, requirePermission, writeAuditFromContext, type AuthVariables } from "../auth.js";
 import { redactAdminUser } from "../serializers.js";
+
+function isUniqueConstraintViolation(error: unknown, constraintName: string) {
+  return (
+    Boolean(error) &&
+    typeof error === "object" &&
+    (error as { code?: unknown; constraint_name?: unknown; constraint?: unknown }).code === "23505" &&
+    ((error as { constraint_name?: unknown }).constraint_name === constraintName ||
+      (error as { constraint?: unknown }).constraint === constraintName)
+  );
+}
 
 export const adminUsersRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/", zValidator("query", paginationQuerySchema), async (c) => {
@@ -30,13 +38,21 @@ export const adminUsersRoute = new Hono<{ Variables: AuthVariables }>()
       throw new HTTPException(409, { message: "Admin username already exists" });
     }
 
-    const admin = await createAdminUser({
-      username: body.username,
-      displayName: body.displayName ?? null,
-      passwordHash: await hashPassword(body.password),
-      role: body.role,
-      status: "active"
-    });
+    let admin: Awaited<ReturnType<typeof createAdminUser>>;
+    try {
+      admin = await createAdminUser({
+        username: body.username,
+        displayName: body.displayName ?? null,
+        passwordHash: await hashPassword(body.password),
+        role: body.role,
+        status: "active"
+      });
+    } catch (error) {
+      if (isUniqueConstraintViolation(error, "admin_users_username_idx")) {
+        throw new HTTPException(409, { message: "Admin username already exists" });
+      }
+      throw error;
+    }
     await writeAuditFromContext(c, {
       action: "admin_user.create",
       targetType: "admin_user",
@@ -50,19 +66,8 @@ export const adminUsersRoute = new Hono<{ Variables: AuthVariables }>()
     requirePermission(c, "admin:write");
     const id = c.req.param("id");
     const body = c.req.valid("json");
-    const before = await findAdminById(id);
-    if (!before) {
-      throw new HTTPException(404, { message: "Admin user not found" });
-    }
 
-    const wouldLoseActiveSuperAdmin =
-      before.role === "super_admin" &&
-      ((body.role !== undefined && body.role !== "super_admin") || body.status === "disabled");
-    if (wouldLoseActiveSuperAdmin && (await countActiveSuperAdmins()) <= 1) {
-      throw new HTTPException(400, { message: "At least one active super admin is required" });
-    }
-
-    const updates: Parameters<typeof updateAdminUser>[1] = {};
+    const updates: Parameters<typeof updateAdminUserWithSuperAdminGuard>[1] = {};
     if (body.displayName !== undefined) {
       updates.displayName = body.displayName;
     }
@@ -76,8 +81,14 @@ export const adminUsersRoute = new Hono<{ Variables: AuthVariables }>()
       updates.status = body.status;
     }
 
-    const updated = await updateAdminUser(id, updates);
-    if (!updated) {
+    const result = await updateAdminUserWithSuperAdminGuard(id, updates);
+    if (!result.before) {
+      throw new HTTPException(404, { message: "Admin user not found" });
+    }
+    if (result.blockedLastActiveSuperAdmin) {
+      throw new HTTPException(400, { message: "At least one active super admin is required" });
+    }
+    if (!result.after) {
       throw new HTTPException(404, { message: "Admin user not found" });
     }
 
@@ -85,9 +96,9 @@ export const adminUsersRoute = new Hono<{ Variables: AuthVariables }>()
       action: "admin_user.update",
       targetType: "admin_user",
       targetId: id,
-      before: redactAdminUser(before),
-      after: redactAdminUser(updated)
+      before: redactAdminUser(result.before),
+      after: redactAdminUser(result.after)
     });
 
-    return c.json({ data: redactAdminUser(updated) });
+    return c.json({ data: redactAdminUser(result.after) });
   });

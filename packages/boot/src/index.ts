@@ -1,10 +1,9 @@
 import {
   createMemory,
-  ensureConversation,
   getRecentMessages,
   getRuntimeSettingsEnvOverrides,
   listMemories,
-  saveMessage,
+  saveConversationTurn,
   searchMemories,
   upsertTelegramUser
 } from "@raiden/database";
@@ -86,15 +85,6 @@ export async function runBootConversation(input: BootConversationInput) {
 
   await rememberBootUser(input);
 
-  const conversation = await ensureConversation(userId);
-  const userMessage = await saveMessage({
-    conversationId: conversation.id,
-    telegramUserId: userId,
-    telegramMessageId: input.sourceMessageId ?? null,
-    role: "user",
-    content: input.content
-  });
-
   const queryEmbedding = await embedText(input.content, bootConfig);
   let memories = await searchMemories({
     telegramUserId: userId,
@@ -127,30 +117,21 @@ export async function runBootConversation(input: BootConversationInput) {
     }))
   });
 
-  const assistantMessage = await saveMessage({
-    conversationId: conversation.id,
+  const { userMessage, assistantMessage } = await saveConversationTurn({
     telegramUserId: userId,
-    role: "assistant",
-    content: reply
+    telegramMessageId: input.sourceMessageId ?? null,
+    userContent: input.content,
+    assistantContent: reply
   });
 
-  const memorySummary = await summarizeForMemory({
-    userName: displayName,
-    userMessage: input.content,
-    assistantReply: reply,
-    config: bootConfig
+  await createDurableMemoryIfUseful({
+    userId,
+    displayName,
+    content: input.content,
+    reply,
+    sourceMessageId: userMessage.id,
+    bootConfig
   });
-
-  if (memorySummary) {
-    const memoryEmbedding = await embedText(memorySummary, bootConfig);
-    await createMemory({
-      telegramUserId: userId,
-      summary: memorySummary,
-      embedding: memoryEmbedding,
-      importance: 6,
-      sourceMessageId: userMessage.id
-    });
-  }
 
   return {
     reply,
@@ -160,6 +141,39 @@ export async function runBootConversation(input: BootConversationInput) {
     userMessageId: userMessage.id,
     assistantMessageId: assistantMessage.id
   };
+}
+
+async function createDurableMemoryIfUseful(input: {
+  userId: string;
+  displayName: string | null;
+  content: string;
+  reply: string;
+  sourceMessageId: string;
+  bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
+}) {
+  try {
+    const memorySummary = await summarizeForMemory({
+      userName: input.displayName,
+      userMessage: input.content,
+      assistantReply: input.reply,
+      config: input.bootConfig
+    });
+
+    if (!memorySummary) {
+      return;
+    }
+
+    const memoryEmbedding = await embedText(memorySummary, input.bootConfig);
+    await createMemory({
+      telegramUserId: input.userId,
+      summary: memorySummary,
+      embedding: memoryEmbedding,
+      importance: 6,
+      sourceMessageId: input.sourceMessageId
+    });
+  } catch (error) {
+    console.warn("Durable memory creation failed; reply was already saved.", error instanceof Error ? error.message : error);
+  }
 }
 
 export async function recallBootMemories(input: BootUserIdentity & { query: string; limit?: number }) {
