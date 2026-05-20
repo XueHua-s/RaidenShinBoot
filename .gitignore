@@ -6,6 +6,6 @@ dist
 .env.local
 .DS_Store
 coverage
+logs/
 *.tsbuildinfo
 pnpm-debug.log*
-
