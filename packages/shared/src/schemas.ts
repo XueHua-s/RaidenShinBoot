@@ -8,6 +8,8 @@ export const telegramChatPolicySchema = z.enum(["allow_all_commands", "commands_
 export const bootGatewayPresetSchema = z.enum(["openai_compatible", "new_api"]);
 export const bootSearchProviderSchema = z.enum(["disabled", "tavily", "brave", "serper"]);
 export const bootSearchDepthSchema = z.enum(["basic", "advanced"]);
+export const bootSearchChannelSchema = z.enum(["google", "wikipedia", "moegirl"]);
+export const bootSearchPipelineStatusSchema = z.enum(["completed", "partial"]);
 
 const emptyStringToNull = (value: unknown) => (value === "" ? null : value);
 const optionalNullableUrlSchema = z.preprocess(emptyStringToNull, z.string().trim().url().nullable().optional());
@@ -191,6 +193,9 @@ export const webSearchResultSchema = z.object({
 export const webSearchResponseSchema = z.object({
   query: z.string(),
   provider: z.string(),
+  status: bootSearchPipelineStatusSchema.default("completed"),
+  channels: z.array(bootSearchChannelSchema).default([]),
+  failures: z.array(z.string()).default([]),
   results: z.array(webSearchResultSchema)
 });
 
@@ -209,6 +214,8 @@ export const systemStatusSchema = z.object({
   bootEmbeddingBaseUrl: z.string().nullable(),
   bootImageBaseUrl: z.string().nullable(),
   bootSearchBaseUrl: z.string().nullable(),
+  bootWikipediaApiUrl: z.string(),
+  bootMoegirlApiUrl: z.string(),
   bootChatModel: z.string(),
   bootEmbeddingModel: z.string(),
   bootImageModel: z.string(),
@@ -233,6 +240,8 @@ export const runtimeSettingsSchema = z.object({
   bootEmbeddingBaseUrl: z.string().url().nullable(),
   bootImageBaseUrl: z.string().url().nullable(),
   bootSearchBaseUrl: z.string().url().nullable(),
+  bootWikipediaApiUrl: z.string().url(),
+  bootMoegirlApiUrl: z.string().url(),
   bootChatModel: z.string(),
   bootEmbeddingModel: z.string(),
   bootImageModel: z.string(),
@@ -259,6 +268,8 @@ export const updateRuntimeSettingsRequestSchema = z.object({
   bootEmbeddingBaseUrl: optionalNullableUrlSchema,
   bootImageBaseUrl: optionalNullableUrlSchema,
   bootSearchBaseUrl: optionalNullableUrlSchema,
+  bootWikipediaApiUrl: z.string().trim().url().optional(),
+  bootMoegirlApiUrl: z.string().trim().url().optional(),
   bootChatModel: z.string().trim().min(1).max(200).optional(),
   bootEmbeddingModel: z.string().trim().min(1).max(200).optional(),
   bootImageModel: z.string().trim().min(1).max(200).optional(),
@@ -280,6 +291,8 @@ export type TelegramChatPolicy = z.infer<typeof telegramChatPolicySchema>;
 export type BootGatewayPreset = z.infer<typeof bootGatewayPresetSchema>;
 export type BootSearchProviderName = z.infer<typeof bootSearchProviderSchema>;
 export type BootSearchDepth = z.infer<typeof bootSearchDepthSchema>;
+export type BootSearchChannel = z.infer<typeof bootSearchChannelSchema>;
+export type BootSearchPipelineStatus = z.infer<typeof bootSearchPipelineStatusSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 export type LoginResponse = z.infer<typeof loginResponseSchema>;
 export type AuthMeResponse = z.infer<typeof authMeResponseSchema>;

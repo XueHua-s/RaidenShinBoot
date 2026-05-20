@@ -1,5 +1,6 @@
 import { config } from "dotenv";
 import { Bot, InputFile } from "grammy";
+import { getEffectiveBootConfig, getEffectiveBootSearchConfig } from "@raiden/boot";
 import { generateMakotoImage } from "@raiden/shared/boot";
 import { formatBootSearchError } from "@raiden/shared/search";
 import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
@@ -84,7 +85,8 @@ bot.command("draw", async (ctx) => {
   const result = await generateMakotoImage({
     prompt,
     size: "1024x1024",
-    n: 1
+    n: 1,
+    config: await getEffectiveBootConfig()
   });
   const image = result.images[0];
   if (!image) {
@@ -106,10 +108,16 @@ bot.command("search", async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   try {
-    const result = await executeBootTool("web_search", {
-      query,
-      maxResults: 5
-    });
+    const result = await executeBootTool(
+      "web_search",
+      {
+        query,
+        maxResults: 5
+      },
+      {
+        searchConfig: await getEffectiveBootSearchConfig()
+      }
+    );
     await ctx.reply(formatWebSearchResultsForTelegram(result), {
       link_preview_options: { is_disabled: true }
     });

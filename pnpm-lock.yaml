@@ -27,11 +27,27 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
-  packages/bot:
+  packages/boot:
     dependencies:
       '@raiden/database':
         specifier: workspace:*
         version: link:../database
+      '@raiden/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/node':
+        specifier: ^22.18.12
+        version: 22.19.19
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/bot:
+    dependencies:
+      '@raiden/boot':
+        specifier: workspace:*
+        version: link:../boot
       '@raiden/shared':
         specifier: workspace:*
         version: link:../shared
@@ -134,6 +150,9 @@ importers:
       '@hono/zod-validator':
         specifier: ^0.8.0
         version: 0.8.0(hono@4.12.21)(zod@4.4.3)
+      '@raiden/boot':
+        specifier: workspace:*
+        version: link:../boot
       '@raiden/database':
         specifier: workspace:*
         version: link:../database
@@ -165,6 +184,9 @@ importers:
       ai:
         specifier: ^6.0.185
         version: 6.0.185(zod@4.4.3)
+      robot3:
+        specifier: ^1.2.0
+        version: 1.2.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -1476,6 +1498,9 @@ packages:
   resolve-pkg-maps@1.0.0:
     resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
 
+  robot3@1.2.0:
+    resolution: {integrity: sha512-Xin8KHqCKrD9Rqk1ZzZQYjsb6S9DRggcfwBqnVPeM3DLtNCJLxWWTrPJDYm3E+ZiTO7H3VMdgyPSkIbuYnYP2Q==}
+
   rolldown-plugin-dts@0.25.1:
     resolution: {integrity: sha512-zK82aC/8z1iVW+g0bCnlQZq04Y5bNeL/RcRwTYBwsnU6wH0N+6vpIFkN7JC0kYRS5qKA+pxQyfIPvXJ6Q5xSpQ==}
     engines: {node: ^22.18.0 || >=24.0.0}
@@ -2596,6 +2621,8 @@ snapshots:
   react@19.2.6: {}
 
   resolve-pkg-maps@1.0.0: {}
+
+  robot3@1.2.0: {}
 
   rolldown-plugin-dts@0.25.1(rolldown@1.0.1)(typescript@5.9.3):
     dependencies:

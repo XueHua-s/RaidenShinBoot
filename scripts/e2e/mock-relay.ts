@@ -2,8 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 export type MockRelayState = {
   chatPrompts: string[];
+  chatCompletionFailures: number;
+  responsesPrompts: string[];
   imagePrompts: string[];
   searchQueries: string[];
+  wikipediaQueries: string[];
+  moegirlQueries: string[];
   summaryPrompts: string[];
   memoryPrompts: string[];
   summaries: string[];
@@ -12,8 +16,12 @@ export type MockRelayState = {
 export function createMockRelayState(): MockRelayState {
   return {
     chatPrompts: [],
+    chatCompletionFailures: 0,
+    responsesPrompts: [],
     imagePrompts: [],
     searchQueries: [],
+    wikipediaQueries: [],
+    moegirlQueries: [],
     summaryPrompts: [],
     memoryPrompts: [],
     summaries: []
@@ -25,6 +33,11 @@ export function createMockRelay(state: MockRelayState) {
     try {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         await handleChatCompletion(req, res, state);
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        await handleResponses(req, res, state);
         return;
       }
 
@@ -40,6 +53,16 @@ export function createMockRelay(state: MockRelayState) {
 
       if (req.method === "POST" && req.url === "/search") {
         await handleSearch(req, res, state);
+        return;
+      }
+
+      if (req.method === "GET" && req.url?.startsWith("/wiki/api.php")) {
+        handleMediaWiki(req, res, state, "wikipedia");
+        return;
+      }
+
+      if (req.method === "GET" && req.url?.startsWith("/moegirl/api.php")) {
+        handleMediaWiki(req, res, state, "moegirl");
         return;
       }
 
@@ -67,6 +90,18 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, s
   };
   const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
   const prompt = body.messages?.find((message) => message.role === "user")?.content ?? "";
+
+  if (body.model === "mock-responses-only") {
+    state.chatCompletionFailures += 1;
+    sendJson(res, 429, {
+      error: {
+        message: "usage_limit_reached",
+        code: "usage_limit_reached"
+      }
+    });
+    return;
+  }
+
   const content = resolveMockChatContent(system, prompt, state);
 
   if (body.stream) {
@@ -87,6 +122,41 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, s
       }
     ],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+  });
+}
+
+async function handleResponses(req: IncomingMessage, res: ServerResponse, state: MockRelayState) {
+  const body = JSON.parse(await readBody(req)) as {
+    model?: string;
+    stream?: boolean;
+    instructions?: string;
+    input?: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
+  };
+  const prompt =
+    body.input
+      ?.flatMap((message) => message.content)
+      .filter((content) => content.type === "input_text")
+      .map((content) => content.text)
+      .join("\n") ?? "";
+  const content = resolveMockChatContent(body.instructions ?? "", prompt, state);
+  state.responsesPrompts.push(prompt);
+
+  if (body.stream) {
+    sendResponsesStream(res, content);
+    return;
+  }
+
+  sendJson(res, 200, {
+    id: "resp-e2e",
+    object: "response",
+    model: body.model ?? "mock-chat",
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: content }]
+      }
+    ]
   });
 }
 
@@ -133,12 +203,73 @@ async function handleSearch(req: IncomingMessage, res: ServerResponse, state: Mo
   });
 }
 
+function handleMediaWiki(
+  req: IncomingMessage,
+  res: ServerResponse,
+  state: MockRelayState,
+  source: "wikipedia" | "moegirl"
+) {
+  const url = new URL(req.url ?? "", "http://127.0.0.1");
+  const query = url.searchParams.get("search") ?? url.searchParams.get("titles") ?? "";
+  if (source === "wikipedia") {
+    state.wikipediaQueries.push(query);
+  } else {
+    state.moegirlQueries.push(query);
+  }
+
+  const action = url.searchParams.get("action");
+  if (action === "opensearch") {
+    const title = source === "wikipedia" ? "雷电将军" : "雷电真";
+    const description =
+      source === "wikipedia"
+        ? "雷电将军是游戏《原神》中的登场角色，与雷电真、雷电影和稻妻剧情相关。"
+        : "雷电真是游戏《原神》及其衍生作品的登场角色。";
+    sendJson(res, 200, [
+      query,
+      [title],
+      [description],
+      [`https://${source === "wikipedia" ? "zh.wikipedia.org/wiki" : "zh.moegirl.org.cn"}/${encodeURIComponent(title)}`]
+    ]);
+    return;
+  }
+
+  if (action === "query") {
+    const title = source === "wikipedia" ? "雷电将军" : "雷电真";
+    const extract =
+      source === "wikipedia"
+        ? "雷电将军条目提供稻妻、雷电真、雷电影相关的百科背景。"
+        : "雷电真是游戏《原神》及其衍生作品的登场角色，也是雷电影的姐姐。";
+    sendJson(res, 200, {
+      batchcomplete: "",
+      query: {
+        pages: {
+          "1": {
+            pageid: 1,
+            ns: 0,
+            title,
+            extract
+          }
+        }
+      }
+    });
+    return;
+  }
+
+  sendJson(res, 400, { error: "unsupported mediawiki action" });
+}
+
 function resolveMockChatContent(system: string, prompt: string, state: MockRelayState) {
   if (system.includes("长期记忆提炼器")) {
     return resolveMockSummary(prompt, state);
   }
 
   state.chatPrompts.push(prompt);
+  if (prompt.includes("Responses fallback")) {
+    return "Responses fallback 已经接入 bot 核心链路。";
+  }
+  if (prompt.includes("搜索状态")) {
+    return "我已经查到资料，并会把来源与当下信息一起纳入判断。";
+  }
   if (prompt.includes("长期记忆：\n1. 用户喜欢被称作小雪，并喜欢稻妻茶点")) {
     state.memoryPrompts.push(prompt);
     return "小雪，我记得你喜欢稻妻茶点；这样的印象我会好好留在心里。";
@@ -147,10 +278,6 @@ function resolveMockChatContent(system: string, prompt: string, state: MockRelay
     state.memoryPrompts.push(prompt);
     return "小雪，我记得在 bot 路径里你喜欢团子牛奶，这也是我对你的清晰印象。";
   }
-  if (prompt.includes("联网搜索结果")) {
-    return "我已经查到资料，并会把来源与当下信息一起纳入判断。";
-  }
-
   return "你好，旅行者。我是真，这次端到端验证已经安稳地接入了雷光。";
 }
 
@@ -196,6 +323,26 @@ function sendChatStream(res: ServerResponse, model: string, content: string) {
       created: Math.floor(Date.now() / 1000),
       model,
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+    })}\n\n`
+  );
+  res.end("data: [DONE]\n\n");
+}
+
+function sendResponsesStream(res: ServerResponse, content: string) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive"
+  });
+  res.write(
+    `data: ${JSON.stringify({
+      type: "response.output_text.delta",
+      delta: content
+    })}\n\n`
+  );
+  res.write(
+    `data: ${JSON.stringify({
+      type: "response.completed"
     })}\n\n`
   );
   res.end("data: [DONE]\n\n");

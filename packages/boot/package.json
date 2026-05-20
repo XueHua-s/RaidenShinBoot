@@ -1,22 +1,24 @@
 {
-  "name": "@raiden/bot",
+  "name": "@raiden/boot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
   "scripts": {
     "build": "tsdown src/index.ts --format esm --dts",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx --conditions=source src/index.ts",
-    "start": "node dist/index.mjs"
+    "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@raiden/boot": "workspace:*",
-    "@raiden/shared": "workspace:*",
-    "dotenv": "^17.2.3",
-    "grammy": "^1.43.0",
-    "zod": "^4.4.3"
+    "@raiden/database": "workspace:*",
+    "@raiden/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.18.12",

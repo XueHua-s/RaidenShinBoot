@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { embed, generateImage, streamText } from "ai";
+import { embed, generateImage } from "ai";
 import { z } from "zod";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
 import type { WebSearchResponse } from "./schemas.js";
@@ -34,6 +34,16 @@ export type MemoryHit = {
   score?: number | null;
 };
 
+export class BootProviderError extends Error {
+  readonly statusCode: number;
+
+  constructor(message: string, statusCode = 502) {
+    super(message);
+    this.name = "BootProviderError";
+    this.statusCode = statusCode;
+  }
+}
+
 export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig {
   return bootEnvSchema.parse(env);
 }
@@ -44,13 +54,6 @@ function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" 
   }
 
   throw new Error(`BOOT_${purpose.toUpperCase()}_API_KEY or BOOT_API_KEY is required`);
-}
-
-function createChatProvider(config = getBootConfig()) {
-  return createOpenAI({
-    apiKey: resolveApiKey(config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY, "chat"),
-    baseURL: config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL
-  });
 }
 
 function createEmbeddingProvider(config = getBootConfig()) {
@@ -68,17 +71,207 @@ function createImageProvider(config = getBootConfig()) {
 }
 
 async function generateStreamedText(input: { system: string; prompt: string; config: BootConfig }) {
-  const provider = createChatProvider(input.config);
-  const result = streamText({
-    model: provider.chat(input.config.BOOT_CHAT_MODEL),
-    system: input.system,
-    prompt: input.prompt
-  });
-  let text = "";
-  for await (const chunk of result.textStream) {
-    text += chunk;
+  let chatError: unknown;
+  try {
+    return await generateChatCompletionsText(input);
+  } catch (error) {
+    chatError = error;
   }
-  return text.trim();
+
+  try {
+    return await generateResponsesText(input);
+  } catch (responsesError) {
+    if (chatError instanceof BootProviderError && responsesError instanceof BootProviderError) {
+      throw new BootProviderError(
+        `${chatError.message}; Responses fallback failed: ${responsesError.message}`,
+        responsesError.statusCode
+      );
+    }
+    throw responsesError;
+  }
+}
+
+async function generateChatCompletionsText(input: { system: string; prompt: string; config: BootConfig }) {
+  const response = await fetch(joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/chat/completions"), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
+      "content-type": "application/json",
+      accept: "text/event-stream"
+    },
+    body: JSON.stringify({
+      model: input.config.BOOT_CHAT_MODEL,
+      stream: true,
+      messages: [
+        { role: "system", content: input.system },
+        { role: "user", content: input.prompt }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw chatProviderError(response.status, await response.text());
+  }
+
+  return readStreamedText(response, parseChatStreamEvent);
+}
+
+async function generateResponsesText(input: { system: string; prompt: string; config: BootConfig }) {
+  const response = await fetch(joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/responses"), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
+      "content-type": "application/json",
+      accept: "text/event-stream"
+    },
+    body: JSON.stringify({
+      model: input.config.BOOT_CHAT_MODEL,
+      stream: true,
+      instructions: input.system,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: input.prompt }]
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw chatProviderError(response.status, await response.text());
+  }
+
+  return readStreamedText(response, parseResponsesStreamEvent);
+}
+
+async function readStreamedText(response: Response, parseEvent: (event: string) => string) {
+  let text = "";
+  let buffer = "";
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new BootProviderError("AI relay did not return a readable chat stream.");
+  }
+
+  const decoder = new TextDecoder();
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split(/\r?\n\r?\n/);
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      text += parseEvent(event);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    text += parseEvent(buffer);
+  }
+
+  const result = text.trim();
+  if (!result) {
+    throw new BootProviderError("AI relay returned an empty chat stream. Check the chat model, key quota, and gateway compatibility.");
+  }
+
+  return result;
+}
+
+function parseChatStreamEvent(event: string) {
+  const data = event
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n")
+    .trim();
+  if (!data || data === "[DONE]") {
+    return "";
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    throw new BootProviderError(`AI relay returned an invalid stream chunk: ${data.slice(0, 160)}`);
+  }
+
+  const error = payload && typeof payload === "object" ? (payload as { error?: { message?: unknown } }).error : null;
+  if (error?.message && typeof error.message === "string") {
+    throw new BootProviderError(error.message);
+  }
+
+  const choice = payload && typeof payload === "object" ? (payload as { choices?: Array<Record<string, unknown>> }).choices?.[0] : null;
+  const delta = choice?.delta;
+  if (delta && typeof delta === "object") {
+    const content = (delta as { content?: unknown }).content;
+    return typeof content === "string" ? content : "";
+  }
+
+  const message = choice?.message;
+  if (message && typeof message === "object") {
+    const content = (message as { content?: unknown }).content;
+    return typeof content === "string" ? content : "";
+  }
+
+  return "";
+}
+
+function parseResponsesStreamEvent(event: string) {
+  const data = event
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n")
+    .trim();
+  if (!data || data === "[DONE]") {
+    return "";
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    throw new BootProviderError(`AI relay returned an invalid Responses stream chunk: ${data.slice(0, 160)}`);
+  }
+
+  const error = payload && typeof payload === "object" ? (payload as { error?: { message?: unknown } }).error : null;
+  if (error?.message && typeof error.message === "string") {
+    throw new BootProviderError(error.message);
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const eventPayload = payload as {
+    type?: unknown;
+    delta?: unknown;
+  };
+
+  if (eventPayload.type === "response.output_text.delta" && typeof eventPayload.delta === "string") {
+    return eventPayload.delta;
+  }
+
+  return "";
+}
+
+function chatProviderError(statusCode: number, body: string) {
+  let message = body || "Unknown provider error.";
+  try {
+    const payload = JSON.parse(body) as { error?: { message?: string } };
+    message = payload.error?.message ?? message;
+  } catch {
+    message = body.slice(0, 500) || message;
+  }
+
+  return new BootProviderError(`AI relay failed with HTTP ${statusCode}: ${message}`, statusCode);
+}
+
+function joinUrl(baseUrl: string, path: string) {
+  return new URL(path.replace(/^\//, ""), baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }
 
 export async function embedText(value: string, config = getBootConfig()): Promise<number[]> {

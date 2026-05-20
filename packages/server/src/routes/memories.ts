@@ -1,11 +1,11 @@
 import { zValidator } from "@hono/zod-validator";
+import { getEffectiveBootConfig } from "@raiden/boot";
 import { countMemories, createMemory, listMemories } from "@raiden/database";
 import { createMemoryRequestSchema, paginationQuerySchema } from "@raiden/shared";
 import { embedText } from "@raiden/shared/boot";
 import { Hono } from "hono";
 import { z } from "zod";
 import { requirePermission, type AuthVariables } from "../auth.js";
-import { getEffectiveBootConfig } from "../runtime-config.js";
 
 const memoryQuerySchema = paginationQuerySchema.extend({
   telegramUserId: z.string().optional()

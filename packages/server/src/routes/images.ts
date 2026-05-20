@@ -1,9 +1,9 @@
 import { zValidator } from "@hono/zod-validator";
+import { getEffectiveBootConfig } from "@raiden/boot";
 import { imageGenerationRequestSchema } from "@raiden/shared";
 import { generateMakotoImage } from "@raiden/shared/boot";
 import { Hono } from "hono";
 import { requirePermission, type AuthVariables } from "../auth.js";
-import { getEffectiveBootConfig } from "../runtime-config.js";
 
 export const imagesRoute = new Hono<{ Variables: AuthVariables }>().post("/", zValidator("json", imageGenerationRequestSchema), async (c) => {
   requirePermission(c, "conversation:write");

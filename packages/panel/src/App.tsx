@@ -1101,6 +1101,8 @@ type RuntimeSettingsForm = Pick<
   | "bootEmbeddingBaseUrl"
   | "bootImageBaseUrl"
   | "bootSearchBaseUrl"
+  | "bootWikipediaApiUrl"
+  | "bootMoegirlApiUrl"
   | "bootChatModel"
   | "bootEmbeddingModel"
   | "bootImageModel"
@@ -1143,6 +1145,8 @@ function settingsToForm(settings: RuntimeSettings): RuntimeSettingsForm {
     bootEmbeddingBaseUrl: settings.bootEmbeddingBaseUrl,
     bootImageBaseUrl: settings.bootImageBaseUrl,
     bootSearchBaseUrl: settings.bootSearchBaseUrl,
+    bootWikipediaApiUrl: settings.bootWikipediaApiUrl,
+    bootMoegirlApiUrl: settings.bootMoegirlApiUrl,
     bootChatModel: settings.bootChatModel,
     bootEmbeddingModel: settings.bootEmbeddingModel,
     bootImageModel: settings.bootImageModel,
@@ -1227,6 +1231,8 @@ function SystemPage() {
           bootEmbeddingBaseUrl: form.bootEmbeddingBaseUrl || null,
           bootImageBaseUrl: form.bootImageBaseUrl || null,
           bootSearchBaseUrl: form.bootSearchBaseUrl || null,
+          bootWikipediaApiUrl: form.bootWikipediaApiUrl,
+          bootMoegirlApiUrl: form.bootMoegirlApiUrl,
           ...secretPatch
         }
       });
@@ -1406,6 +1412,22 @@ function SystemPage() {
                       value={form.bootSearchBaseUrl ?? ""}
                       onChange={(event) => setForm({ ...form, bootSearchBaseUrl: event.target.value || null })}
                       placeholder={t("system.providerDefault")}
+                    />
+                  </Label>
+                  <Label>
+                    {t("system.wikipediaApiUrl")}
+                    <Input
+                      value={form.bootWikipediaApiUrl}
+                      onChange={(event) => setForm({ ...form, bootWikipediaApiUrl: event.target.value })}
+                      placeholder="https://zh.wikipedia.org/w/api.php"
+                    />
+                  </Label>
+                  <Label>
+                    {t("system.moegirlApiUrl")}
+                    <Input
+                      value={form.bootMoegirlApiUrl}
+                      onChange={(event) => setForm({ ...form, bootMoegirlApiUrl: event.target.value })}
+                      placeholder="https://zh.moegirl.org.cn/api.php"
                     />
                   </Label>
                   <div className="grid grid-cols-2 gap-3">

@@ -19,6 +19,7 @@
     "paths": {
       "@raiden/shared": ["packages/shared/src/index.ts"],
       "@raiden/shared/*": ["packages/shared/src/*"],
+      "@raiden/boot": ["packages/boot/src/index.ts"],
       "@raiden/database": ["packages/database/src/index.ts"],
       "@raiden/database/*": ["packages/database/src/*"],
       "@raiden/server": ["packages/server/src/index.ts"],
@@ -26,4 +27,3 @@
     }
   }
 }
-

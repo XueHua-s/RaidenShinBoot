@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { logger } from "hono/logger";
+import { BootProviderError } from "@raiden/shared/boot";
 import { authMiddleware, type AuthVariables } from "./auth.js";
 import { adminSessionsRoute } from "./routes/admin-sessions.js";
 import { adminUsersRoute } from "./routes/admin-users.js";
@@ -56,6 +57,9 @@ export const app = new Hono()
   .onError((error, c) => {
     if (error instanceof HTTPException) {
       return c.json({ error: error.message }, error.status);
+    }
+    if (error instanceof BootProviderError) {
+      return c.json({ error: error.message }, error.statusCode as 500);
     }
 
     console.error(error);

@@ -10,12 +10,14 @@ import { updateRuntimeSettingsRequestSchema, type RuntimeSettings } from "@raide
 import { getBootConfig } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import { zValidator } from "@hono/zod-validator";
+import { loadRuntimeEnv } from "@raiden/boot";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission, type AuthVariables, writeAuditFromContext } from "../auth.js";
-import { loadRuntimeEnv } from "../runtime-config.js";
 
 const defaultBootBaseUrl = "https://proxy.xhblog.top:3000/v1";
+const defaultWikipediaApiUrl = "https://zh.wikipedia.org/w/api.php";
+const defaultMoegirlApiUrl = "https://zh.moegirl.org.cn/api.php";
 
 const publicSettingFields = {
   gatewayPreset: "BOOT_GATEWAY_PRESET",
@@ -24,6 +26,8 @@ const publicSettingFields = {
   bootEmbeddingBaseUrl: "BOOT_EMBEDDING_BASE_URL",
   bootImageBaseUrl: "BOOT_IMAGE_BASE_URL",
   bootSearchBaseUrl: "BOOT_SEARCH_BASE_URL",
+  bootWikipediaApiUrl: "BOOT_WIKIPEDIA_API_URL",
+  bootMoegirlApiUrl: "BOOT_MOEGIRL_API_URL",
   bootChatModel: "BOOT_CHAT_MODEL",
   bootEmbeddingModel: "BOOT_EMBEDDING_MODEL",
   bootImageModel: "BOOT_IMAGE_MODEL",
@@ -91,6 +95,8 @@ async function buildRuntimeSettingsPayload(): Promise<RuntimeSettings> {
     bootEmbeddingBaseUrl: bootConfig.BOOT_EMBEDDING_BASE_URL ?? null,
     bootImageBaseUrl: bootConfig.BOOT_IMAGE_BASE_URL ?? null,
     bootSearchBaseUrl: searchConfig.BOOT_SEARCH_BASE_URL ?? null,
+    bootWikipediaApiUrl: searchConfig.BOOT_WIKIPEDIA_API_URL,
+    bootMoegirlApiUrl: searchConfig.BOOT_MOEGIRL_API_URL,
     bootChatModel: bootConfig.BOOT_CHAT_MODEL,
     bootEmbeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
     bootImageModel: bootConfig.BOOT_IMAGE_MODEL,
@@ -121,6 +127,8 @@ export function healthStatusPayload() {
     bootEmbeddingBaseUrl: process.env.BOOT_EMBEDDING_BASE_URL || process.env.BOOT_BASE_URL || null,
     bootImageBaseUrl: process.env.BOOT_IMAGE_BASE_URL || process.env.BOOT_BASE_URL || null,
     bootSearchBaseUrl: process.env.BOOT_SEARCH_BASE_URL || null,
+    bootWikipediaApiUrl: process.env.BOOT_WIKIPEDIA_API_URL ?? defaultWikipediaApiUrl,
+    bootMoegirlApiUrl: process.env.BOOT_MOEGIRL_API_URL ?? defaultMoegirlApiUrl,
     bootChatModel: process.env.BOOT_CHAT_MODEL ?? "gpt-5.5",
     bootEmbeddingModel: process.env.BOOT_EMBEDDING_MODEL ?? "text-embedding-3-large",
     bootImageModel: process.env.BOOT_IMAGE_MODEL ?? "gpt-image-1",
@@ -153,6 +161,8 @@ export async function systemStatusPayload() {
     bootEmbeddingBaseUrl: bootConfig.BOOT_EMBEDDING_BASE_URL ?? bootConfig.BOOT_BASE_URL,
     bootImageBaseUrl: bootConfig.BOOT_IMAGE_BASE_URL ?? bootConfig.BOOT_BASE_URL,
     bootSearchBaseUrl: searchConfig.BOOT_SEARCH_BASE_URL ?? null,
+    bootWikipediaApiUrl: searchConfig.BOOT_WIKIPEDIA_API_URL,
+    bootMoegirlApiUrl: searchConfig.BOOT_MOEGIRL_API_URL,
     bootChatModel: bootConfig.BOOT_CHAT_MODEL,
     bootEmbeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
     bootImageModel: bootConfig.BOOT_IMAGE_MODEL,

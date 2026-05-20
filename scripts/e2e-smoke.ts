@@ -3,9 +3,11 @@ import {
   createAdminUser,
   deleteRuntimeSetting,
   getSqlClient,
+  listRuntimeSettings,
   listMemories,
   resolveTelegramChatAccess,
-  updateTelegramChat
+  updateTelegramChat,
+  upsertRuntimeSetting
 } from "@raiden/database";
 import { app } from "@raiden/server/app";
 import { hashPassword } from "@raiden/server/auth";
@@ -37,6 +39,8 @@ async function main() {
     "BOOT_EMBEDDING_BASE_URL",
     "BOOT_IMAGE_BASE_URL",
     "BOOT_SEARCH_BASE_URL",
+    "BOOT_WIKIPEDIA_API_URL",
+    "BOOT_MOEGIRL_API_URL",
     "BOOT_API_KEY",
     "BOOT_CHAT_API_KEY",
     "BOOT_EMBEDDING_API_KEY",
@@ -49,6 +53,9 @@ async function main() {
     "BOOT_SEARCH_MAX_RESULTS",
     "BOOT_SEARCH_DEPTH"
   ];
+  const runtimeSettingsSnapshot = (await listRuntimeSettings()).filter((setting) =>
+    runtimeSettingKeys.includes(setting.key)
+  );
 
   process.env.BOOT_SETTINGS_ENCRYPTION_KEY = "e2e-runtime-settings-secret";
   process.env.BOOT_BASE_URL = `http://127.0.0.1:${port}/v1`;
@@ -61,6 +68,8 @@ async function main() {
   process.env.BOOT_IMAGE_MODEL = "mock-image";
   process.env.BOOT_SEARCH_PROVIDER = "tavily";
   process.env.BOOT_SEARCH_BASE_URL = `http://127.0.0.1:${port}`;
+  process.env.BOOT_WIKIPEDIA_API_URL = `http://127.0.0.1:${port}/wiki/api.php`;
+  process.env.BOOT_MOEGIRL_API_URL = `http://127.0.0.1:${port}/moegirl/api.php`;
   process.env.BOOT_SEARCH_API_KEY = "e2e-local-search-key";
   process.env.BOOT_SEARCH_MAX_RESULTS = "5";
 
@@ -155,6 +164,8 @@ async function main() {
       bootImageModel: "mock-image",
       bootSearchProvider: "tavily",
       bootSearchBaseUrl: `http://127.0.0.1:${port}`,
+      bootWikipediaApiUrl: `http://127.0.0.1:${port}/wiki/api.php`,
+      bootMoegirlApiUrl: `http://127.0.0.1:${port}/moegirl/api.php`,
       bootSearchMaxResults: 5,
       bootSearchDepth: "basic",
       bootApiKey: "e2e-local-key",
@@ -306,8 +317,12 @@ async function main() {
       throw new Error(`Search tools route failed with ${toolsResponse.status}: ${await toolsResponse.text()}`);
     }
     const toolsPayload = (await toolsResponse.json()) as { tools?: Array<{ name?: string }> };
-    if (!toolsPayload.tools?.some((tool) => tool.name === "web_search")) {
-      throw new Error("Boot tool registry did not expose web_search");
+    if (
+      !toolsPayload.tools?.some((tool) => tool.name === "web_search") ||
+      !toolsPayload.tools.some((tool) => tool.name === "wikipedia_search") ||
+      !toolsPayload.tools.some((tool) => tool.name === "moegirl_search")
+    ) {
+      throw new Error("Boot tool registry did not expose routed and specialized search tools");
     }
 
     const searchResponse = await authedRequest("/api/search", {
@@ -323,9 +338,10 @@ async function main() {
     }
     const searchPayload = (await searchResponse.json()) as {
       provider?: string;
+      channels?: string[];
       results?: Array<{ title?: string; url?: string; snippet?: string }>;
     };
-    if (searchPayload.provider !== "tavily" || searchPayload.results?.length !== 2) {
+    if (searchPayload.provider !== "router:google" || !searchPayload.channels?.includes("google") || searchPayload.results?.length !== 2) {
       throw new Error("Search route returned an invalid payload");
     }
     if (!searchPayload.results[0]?.url?.startsWith("https://example.com/")) {
@@ -362,8 +378,28 @@ async function main() {
     if (!searchChatPayload.reply || (searchChatPayload.webSearchResultCount ?? 0) < 1) {
       throw new Error("Search-enabled chat did not execute web_search");
     }
-    if (!relayState.chatPrompts.some((prompt) => prompt.includes("联网搜索结果") && prompt.includes("raiden-tools"))) {
+    if (!relayState.chatPrompts.some((prompt) => prompt.includes("搜索状态") && prompt.includes("raiden-tools"))) {
       throw new Error("Search-enabled chat did not inject web results into the Makoto prompt");
+    }
+
+    const knowledgeChat = await authedRequest("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        username: "e2e_user",
+        content: "雷电真是谁？请结合二次元角色设定和百科背景回答。"
+      })
+    });
+    if (!knowledgeChat.ok) {
+      throw new Error(`Knowledge-routed chat failed with ${knowledgeChat.status}: ${await knowledgeChat.text()}`);
+    }
+    const knowledgeChatPayload = (await knowledgeChat.json()) as { reply?: string; webSearchResultCount?: number };
+    if (!knowledgeChatPayload.reply || (knowledgeChatPayload.webSearchResultCount ?? 0) < 1) {
+      throw new Error("Knowledge-routed chat did not execute specialized search");
+    }
+    if (relayState.wikipediaQueries.length < 1 || relayState.moegirlQueries.length < 1) {
+      throw new Error("Knowledge-routed chat did not query Wikipedia and Moegirl channels");
     }
 
     const searchQueryCountBeforeFailure = relayState.searchQueries.length;
@@ -391,6 +427,32 @@ async function main() {
     }
     process.env.BOOT_SEARCH_API_KEY = originalSearchApiKey;
     await patchRuntimeSettings({ bootSearchApiKey: "e2e-local-search-key" });
+
+    const responseFallbackFailuresBefore = relayState.chatCompletionFailures;
+    await patchRuntimeSettings({ bootChatModel: "mock-responses-only" });
+    const responsesFallbackChat = await authedRequest("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        username: "e2e_user",
+        content: "请验证 Responses fallback 是否已经接入 bot 核心链路。"
+      })
+    });
+    if (!responsesFallbackChat.ok) {
+      throw new Error(`Responses fallback chat failed with ${responsesFallbackChat.status}: ${await responsesFallbackChat.text()}`);
+    }
+    const responsesFallbackPayload = (await responsesFallbackChat.json()) as { reply?: string };
+    if (!responsesFallbackPayload.reply?.includes("Responses fallback")) {
+      throw new Error("Responses fallback chat did not return the expected reply");
+    }
+    if (
+      relayState.chatCompletionFailures <= responseFallbackFailuresBefore ||
+      !relayState.responsesPrompts.some((prompt) => prompt.includes("Responses fallback"))
+    ) {
+      throw new Error("Responses fallback did not exercise the /v1/responses stream path");
+    }
+    await patchRuntimeSettings({ bootChatModel: "mock-chat" });
 
     const imageResponse = await authedRequest("/api/images", {
       method: "POST",
@@ -433,8 +495,12 @@ async function main() {
           memoryPromptCount: relayState.memoryPrompts.length,
           imagePromptCount: relayState.imagePrompts.length,
           searchQueryCount: relayState.searchQueries.length,
+          wikipediaQueryCount: relayState.wikipediaQueries.length,
+          moegirlQueryCount: relayState.moegirlQueries.length,
           disabledSearchStatus: disabledSearchResponse.status,
           failedSearchChatStatus: failedSearchChatPayload.webSearchStatus,
+          chatCompletionFailures: relayState.chatCompletionFailures,
+          responsesPromptCount: relayState.responsesPrompts.length,
           summaryCount: relayState.summaries.length,
           pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
           approvedGroupAllowed: approvedGroupAccess.allowed,
@@ -452,6 +518,16 @@ async function main() {
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
+    await Promise.all(
+      runtimeSettingsSnapshot.map((setting) =>
+        upsertRuntimeSetting({
+          key: setting.key,
+          value: setting.value,
+          encrypted: setting.encrypted,
+          updatedByAdminId: setting.updatedByAdminId ?? null
+        })
+      )
+    );
     await closeDatabase();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
