@@ -127,21 +127,39 @@ export type EffectiveBootToolOptions = {
   permission?: BootToolPermissionContext;
   audit?: BootToolContext["audit"];
   fetch?: typeof fetch;
+  searchConfig?: BootToolContext["searchConfig"];
+  imageGenerator?: BootToolContext["imageGenerator"];
 };
 
-export async function getEffectiveBootToolContext(options: EffectiveBootToolOptions = {}): Promise<BootToolContext> {
-  const runtimeEnv = await loadRuntimeEnv();
-  const bootConfig = getBootConfig(runtimeEnv);
-  const context: BootToolContext = {
-    searchConfig: getBootSearchConfig(runtimeEnv),
-    imageGenerator: (input) =>
-      generateMakotoImage({
+const searchBootToolNames = new Set<BootToolName>(["web_search", "google_search", "wikipedia_search", "moegirl_search"]);
+
+export async function getEffectiveBootToolContext(
+  nameOrOptions: BootToolName | EffectiveBootToolOptions = {},
+  maybeOptions: EffectiveBootToolOptions = {}
+): Promise<BootToolContext> {
+  const toolName = typeof nameOrOptions === "string" ? nameOrOptions : undefined;
+  const options = typeof nameOrOptions === "string" ? maybeOptions : nameOrOptions;
+  const context: BootToolContext = {};
+
+  if (options.searchConfig !== undefined) {
+    context.searchConfig = options.searchConfig;
+  } else if (toolName === undefined || searchBootToolNames.has(toolName)) {
+    context.loadSearchConfig = async () => getBootSearchConfig(await loadRuntimeEnv());
+  }
+
+  if (options.imageGenerator !== undefined) {
+    context.imageGenerator = options.imageGenerator;
+  } else if (toolName === undefined || toolName === "makoto_image") {
+    context.imageGenerator = async (input) => {
+      const bootConfig = getBootConfig(await loadRuntimeEnv());
+      return generateMakotoImage({
         prompt: input.prompt,
         size: input.size as `${number}x${number}`,
         n: input.n,
         config: bootConfig
-      })
-  };
+      });
+    };
+  }
 
   if (options.permission !== undefined) {
     context.permission = options.permission;
@@ -161,7 +179,7 @@ export async function executeEffectiveBootTool<Name extends BootToolName>(
   input: BootToolInput<Name>,
   options: EffectiveBootToolOptions = {}
 ): Promise<BootToolOutput<Name>> {
-  return executeBootTool(name, input, await getEffectiveBootToolContext(options));
+  return executeBootTool(name, input, await getEffectiveBootToolContext(name, options));
 }
 
 export async function rememberBootUser(identity: BootUserIdentity) {

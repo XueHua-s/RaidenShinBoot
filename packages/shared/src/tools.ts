@@ -52,6 +52,7 @@ export type BootToolAuditEvent = {
 
 export type BootToolContext = {
   searchConfig?: BootSearchConfig;
+  loadSearchConfig?: () => BootSearchConfig | Promise<BootSearchConfig>;
   fetch?: typeof fetch;
   imageGenerator?: (input: ImageGenerationRequest) => Promise<ImageGenerationResponse>;
   permission?: BootToolPermissionContext;
@@ -145,7 +146,7 @@ const webSearchTool = buildBootTool({
   inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
   execute: async (input, context) => {
-    return searchWeb(input, searchOptions(context));
+    return searchWeb(input, await searchOptions(context));
   }
 } satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
@@ -165,7 +166,7 @@ const googleSearchTool = buildBootTool({
   outputSchema: webSearchResponseSchema,
   inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchGoogle(input, searchOptions(context))
+  execute: async (input, context) => searchGoogle(input, await searchOptions(context))
 } satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
 const wikipediaSearchTool = buildBootTool({
@@ -184,7 +185,7 @@ const wikipediaSearchTool = buildBootTool({
   outputSchema: webSearchResponseSchema,
   inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchWikipedia(input, searchOptions(context))
+  execute: async (input, context) => searchWikipedia(input, await searchOptions(context))
 } satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
 const moegirlSearchTool = buildBootTool({
@@ -203,7 +204,7 @@ const moegirlSearchTool = buildBootTool({
   outputSchema: webSearchResponseSchema,
   inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchMoegirl(input, searchOptions(context))
+  execute: async (input, context) => searchMoegirl(input, await searchOptions(context))
 } satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
 const makotoImageTool = buildBootTool({
@@ -221,6 +222,7 @@ const makotoImageTool = buildBootTool({
   inputSchema: imageGenerationRequestSchema,
   outputSchema: imageGenerationResponseSchema,
   inputSummary: (input) => input.prompt,
+  budgetOutput: budgetImageGenerationResponse,
   execute: async (input, context) => {
     if (!context?.imageGenerator) {
       throw new BootToolRuntimeError("tool_context_missing", "Image generation is not configured for this runtime.", 503, "makoto_image");
@@ -410,6 +412,41 @@ function budgetWebSearchResponse(output: WebSearchResponse, budgetChars: number)
   return budgeted;
 }
 
+function budgetImageGenerationResponse(output: ImageGenerationResponse, budgetChars: number): ImageGenerationResponse {
+  const budgeted: ImageGenerationResponse = {
+    images: output.images.map((image) => ({ ...image })),
+    warnings: output.warnings.map((warning) => trimForAudit(warning, 1000))
+  };
+  let droppedImages = 0;
+
+  while (outputSizeChars(budgeted) > budgetChars && budgeted.images.length > 1) {
+    budgeted.images.pop();
+    droppedImages += 1;
+  }
+
+  if (outputSizeChars(budgeted) > budgetChars && budgeted.warnings.length > 0) {
+    budgeted.warnings = [];
+  }
+
+  if (droppedImages > 0) {
+    budgeted.warnings.push(`Dropped ${droppedImages} generated image result(s) to stay within the tool output budget.`);
+    if (outputSizeChars(budgeted) > budgetChars) {
+      budgeted.warnings.pop();
+    }
+  }
+
+  if (outputSizeChars(budgeted) > budgetChars) {
+    throw new BootToolRuntimeError(
+      "tool_output_budget_exceeded",
+      "Image generation returned a result larger than the tool output budget.",
+      502,
+      "makoto_image"
+    );
+  }
+
+  return budgeted;
+}
+
 function toolInputSummary<Input, Output>(tool: BootToolDefinition<Input, Output>, input: Input) {
   if (!tool.inputSummary) {
     return undefined;
@@ -536,6 +573,14 @@ export function formatBootToolError(error: unknown) {
   return error instanceof Error ? error.message : "Boot tool failed.";
 }
 
+function parseToolOutput<Input, Output>(tool: BootToolDefinition<Input, Output>, output: unknown) {
+  try {
+    return tool.outputSchema.parse(output);
+  } catch {
+    throw new BootToolRuntimeError("tool_output_schema_invalid", `Invalid output from tool ${tool.name}.`, 502, tool.name);
+  }
+}
+
 export async function executeBootTool<Name extends BootToolName>(
   name: Name,
   input: BootToolInput<Name>,
@@ -587,9 +632,9 @@ export async function executeBootTool<Name extends BootToolName>(
   const executableInput = permission.input ?? parsedInput;
   try {
     const output = await tool.execute(executableInput, context);
-    const parsedOutput = tool.outputSchema.parse(output);
+    const parsedOutput = parseToolOutput(tool, output);
     const budgetedOutput = tool.budgetOutput ? tool.budgetOutput(parsedOutput, tool.resultBudgetChars) : parsedOutput;
-    const finalOutput = tool.outputSchema.parse(budgetedOutput);
+    const finalOutput = parseToolOutput(tool, budgetedOutput);
     const event = baseAuditEvent(tool, context, startTime);
     event.status = "completed";
     event.resultSizeChars = outputSizeChars(finalOutput);
@@ -652,10 +697,12 @@ export async function maybeExecuteWebSearchForMessage(content: string, context?:
   return (await resolveWebSearchForMessage(content, context)).response;
 }
 
-function searchOptions(context: BootToolContext | undefined, defaults: Partial<SearchWebOptions> = {}) {
+async function searchOptions(context: BootToolContext | undefined, defaults: Partial<SearchWebOptions> = {}) {
   const options: SearchWebOptions = { ...defaults };
   if (context?.searchConfig) {
     options.config = context.searchConfig;
+  } else if (context?.loadSearchConfig) {
+    options.config = await context.loadSearchConfig();
   }
   if (context?.fetch) {
     options.fetch = context.fetch;
