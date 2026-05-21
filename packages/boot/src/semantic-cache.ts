@@ -22,6 +22,13 @@ const robot3 =
 const { createMachine, guard, immediate, interpret, invoke, reduce, state, transition } = robot3;
 
 export type ConversationCacheStatus = "disabled" | "miss" | "l1_hit" | "l2_hit" | "write_skipped" | "written" | "write_failed";
+export type ConversationCacheWebSearchStatus = "skipped" | "completed" | "failed";
+
+export type ConversationCacheMetadata = {
+  memoryCount: number;
+  webSearchResultCount: number;
+  webSearchStatus: ConversationCacheWebSearchStatus;
+};
 
 export type SemanticCacheConfig = {
   enabled: boolean;
@@ -42,7 +49,7 @@ export type ConversationCacheHit = {
   reply: string;
   similarity: number | null;
   sourceKey: string;
-};
+} & ConversationCacheMetadata;
 
 export type ConversationCacheLookup = ConversationCacheHit | { status: "disabled" | "miss"; reason?: string };
 
@@ -218,6 +225,7 @@ export async function writeConversationCache(input: {
   reply: string;
   embedding: number[];
   model: string;
+  metadata: ConversationCacheMetadata;
   config?: SemanticCacheConfig | undefined;
 }): Promise<ConversationCacheWriteResult> {
   const config = input.config ?? getSemanticCacheConfig();
@@ -248,6 +256,9 @@ export async function writeConversationCache(input: {
         query: input.content,
         reply: input.reply,
         model: input.model,
+        memoryCount: String(nonNegativeInteger(input.metadata.memoryCount)),
+        webSearchResultCount: String(nonNegativeInteger(input.metadata.webSearchResultCount)),
+        webSearchStatus: input.metadata.webSearchStatus,
         createdAt: new Date().toISOString(),
         embedding: float32VectorBuffer(input.embedding)
       });
@@ -310,12 +321,21 @@ async function readExactCache(context: LookupContext): Promise<ConversationCache
   if (!validEntry(entry, context.config.namespace, context.scope, context.contextFingerprint)) {
     return null;
   }
+  const metadata = cacheEntryMetadata({
+    memoryCount: entry.memoryCount,
+    webSearchResultCount: entry.webSearchResultCount,
+    webSearchStatus: entry.webSearchStatus
+  });
+  if (!metadata) {
+    return null;
+  }
 
   return {
     status: "l1_hit",
     reply: entry.reply,
     similarity: 1,
-    sourceKey: itemKey
+    sourceKey: itemKey,
+    ...metadata
   };
 }
 
@@ -341,13 +361,10 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
     "SORTBY",
     "distance",
     "RETURN",
-    "7",
+    "4",
     "namespace",
     "scope",
     "contextFingerprint",
-    "normalizedQuery",
-    "query",
-    "reply",
     "distance",
     "DIALECT",
     "2"
@@ -359,17 +376,29 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
       hit.namespace !== context.config.namespace ||
       hit.scope !== context.scope ||
       hit.contextFingerprint !== context.contextFingerprint ||
-      !hit.reply ||
       hit.distance > maxDistance
     ) {
+      continue;
+    }
+    const entry = await client.hGetAll(hit.key);
+    if (!validEntry(entry, context.config.namespace, context.scope, context.contextFingerprint)) {
+      continue;
+    }
+    const metadata = cacheEntryMetadata({
+      memoryCount: entry.memoryCount,
+      webSearchResultCount: entry.webSearchResultCount,
+      webSearchStatus: entry.webSearchStatus
+    });
+    if (!metadata) {
       continue;
     }
 
     return {
       status: "l2_hit",
-      reply: hit.reply,
+      reply: entry.reply,
       similarity: 1 - hit.distance,
-      sourceKey: hit.key
+      sourceKey: hit.key,
+      ...metadata
     };
   }
 
@@ -521,7 +550,6 @@ function parseSearchResponse(response: unknown) {
     namespace: string | undefined;
     scope: string | undefined;
     contextFingerprint: string | undefined;
-    reply: string | undefined;
     distance: number;
   }> = [];
   for (let index = 1; index < response.length; index += 2) {
@@ -545,7 +573,6 @@ function parseSearchResponse(response: unknown) {
       namespace: record.namespace,
       scope: record.scope,
       contextFingerprint: record.contextFingerprint,
-      reply: record.reply,
       distance: Number(record.distance ?? Number.POSITIVE_INFINITY)
     });
   }
@@ -565,6 +592,41 @@ function redisValueToString(value: unknown) {
   }
 
   return undefined;
+}
+
+function cacheEntryMetadata(entry: {
+  memoryCount?: string | undefined;
+  webSearchResultCount?: string | undefined;
+  webSearchStatus?: string | undefined;
+}): ConversationCacheMetadata | null {
+  const memoryCount = parseNonNegativeInteger(entry.memoryCount);
+  const webSearchResultCount = parseNonNegativeInteger(entry.webSearchResultCount);
+  if (
+    memoryCount === null ||
+    webSearchResultCount === null ||
+    !isConversationCacheWebSearchStatus(entry.webSearchStatus)
+  ) {
+    return null;
+  }
+
+  return {
+    memoryCount,
+    webSearchResultCount,
+    webSearchStatus: entry.webSearchStatus
+  };
+}
+
+function isConversationCacheWebSearchStatus(value: string | undefined): value is ConversationCacheWebSearchStatus {
+  return value === "skipped" || value === "completed" || value === "failed";
+}
+
+function parseNonNegativeInteger(value: string | undefined) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function nonNegativeInteger(value: number) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function escapeTagValue(value: string) {

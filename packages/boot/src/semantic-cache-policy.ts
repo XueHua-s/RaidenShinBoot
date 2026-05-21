@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isMemoryMutationRequest, isMemoryRecallRequest } from "@raiden/shared";
 import { shouldUseBootSearchForMessage } from "@raiden/shared/tools";
 
-export const conversationCachePolicyVersion = "conversation-cache-v2";
+export const conversationCachePolicyVersion = "conversation-cache-v3";
 
 export type ConversationCacheFingerprintInput = {
   protocol: string;

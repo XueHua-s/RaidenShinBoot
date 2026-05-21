@@ -454,7 +454,7 @@ const dictionaries = { zh, en };
 
 type Variables = Record<string, string | number>;
 
-type I18nContextValue = {
+export type I18nContextValue = {
   locale: Locale;
   setLocale: (locale: Locale) => void;
   t: (key: TranslationKey, variables?: Variables) => string;

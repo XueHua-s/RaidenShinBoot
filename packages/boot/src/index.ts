@@ -11,7 +11,7 @@ import { isMemoryRecallRequest } from "@raiden/shared";
 import { embedText, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import { resolveWebSearchForMessage } from "@raiden/shared/tools";
-import { enqueueMemoryEnrichment, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
+import { enqueueMemoryEnrichment, getBootQueueConfig, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
 import {
   buildConversationCacheContextFingerprint,
   conversationCacheScope,
@@ -19,6 +19,7 @@ import {
   lookupConversationCache,
   writeConversationCache,
   type ConversationCacheHit,
+  type ConversationCacheMetadata,
   type ConversationCacheStatus
 } from "./semantic-cache.js";
 
@@ -48,6 +49,8 @@ type DurableMemoryInput = {
   sourceMessageId: string;
   bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
 };
+
+type RuntimeEnv = NodeJS.ProcessEnv;
 
 type CacheContextMessage = {
   id?: string | undefined;
@@ -127,6 +130,7 @@ export async function runBootConversation(input: BootConversationInput) {
   const bootConfig = getBootConfig(runtimeEnv);
   const searchConfig = getBootSearchConfig(runtimeEnv);
   const semanticCacheConfig = getSemanticCacheConfig(runtimeEnv);
+  const queueConfig = getBootQueueConfig(runtimeEnv);
   const userId = storageUserId(input);
   const cacheScope = conversationCacheScope({ protocol: input.protocol, userId: input.userId });
 
@@ -203,6 +207,11 @@ export async function runBootConversation(input: BootConversationInput) {
   }
 
   const webSearch = await resolveWebSearchForMessage(input.content, { searchConfig });
+  const responseMetadata: ConversationCacheMetadata = {
+    memoryCount: memories.length,
+    webSearchResultCount: webSearch.response?.results.length ?? 0,
+    webSearchStatus: webSearch.status
+  };
   const displayName = input.firstName ?? input.username ?? null;
 
   const reply = await generateMakotoReply({
@@ -231,7 +240,9 @@ export async function runBootConversation(input: BootConversationInput) {
     content: input.content,
     reply,
     sourceMessageId: userMessage.id,
-    bootConfig
+    bootConfig,
+    runtimeEnv,
+    queueConfig
   });
   refreshConversationCacheInBackground({
     identity: input,
@@ -243,14 +254,13 @@ export async function runBootConversation(input: BootConversationInput) {
     content: input.content,
     reply,
     embedding: queryEmbedding,
+    metadata: responseMetadata,
     warning: "Semantic cache write failed."
   });
 
   return {
     reply,
-    memoryCount: memories.length,
-    webSearchResultCount: webSearch.response?.results.length ?? 0,
-    webSearchStatus: webSearch.status,
+    ...responseMetadata,
     cacheStatus,
     cacheSimilarity: null,
     userMessageId: userMessage.id,
@@ -284,14 +294,13 @@ async function saveCachedReply(input: {
     content: input.input.content,
     reply: input.hit.reply,
     embedding: input.embedding,
+    metadata: cacheHitMetadata(input.hit),
     warning: "Semantic cache refresh after hit failed."
   });
 
   return {
     reply: input.hit.reply,
-    memoryCount: 0,
-    webSearchResultCount: 0,
-    webSearchStatus: "skipped" as const,
+    ...cacheHitMetadata(input.hit),
     cacheStatus: input.hit.status,
     cacheSimilarity: input.hit.similarity,
     userMessageId: userMessage.id,
@@ -327,6 +336,7 @@ function refreshConversationCacheInBackground(input: {
   content: string;
   reply: string;
   embedding?: number[] | undefined;
+  metadata: ConversationCacheMetadata;
   warning: string;
 }) {
   void (async () => {
@@ -350,6 +360,7 @@ function refreshConversationCacheInBackground(input: {
       reply: input.reply,
       embedding,
       model: input.bootConfig.BOOT_CHAT_MODEL,
+      metadata: input.metadata,
       config: input.semanticCacheConfig
     });
     if (result.status === "write_failed") {
@@ -363,6 +374,8 @@ function refreshConversationCacheInBackground(input: {
 async function scheduleDurableMemoryIfUseful(
   input: MemoryEnrichmentJob & {
     bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
+    runtimeEnv: RuntimeEnv;
+    queueConfig: ReturnType<typeof getBootQueueConfig>;
   }
 ) {
   const jobInput: MemoryEnrichmentJob = {
@@ -373,9 +386,9 @@ async function scheduleDurableMemoryIfUseful(
     sourceMessageId: input.sourceMessageId
   };
 
-  if (isBootQueueConfigured() && envFlag(process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED, false)) {
+  if (isBootQueueConfigured(input.queueConfig) && envFlag(input.runtimeEnv.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED, false)) {
     try {
-      await enqueueMemoryEnrichment(jobInput);
+      await enqueueMemoryEnrichment(jobInput, input.queueConfig);
       return;
     } catch (error) {
       console.warn("Memory enrichment enqueue failed; falling back to background inline task.", error instanceof Error ? error.message : error);
@@ -385,6 +398,14 @@ async function scheduleDurableMemoryIfUseful(
   }
 
   await createDurableMemoryBestEffort(input, "Durable memory creation failed; reply was already saved.");
+}
+
+function cacheHitMetadata(hit: ConversationCacheHit): ConversationCacheMetadata {
+  return {
+    memoryCount: hit.memoryCount,
+    webSearchResultCount: hit.webSearchResultCount,
+    webSearchStatus: hit.webSearchStatus
+  };
 }
 
 async function createDurableMemoryBestEffort(input: DurableMemoryInput, message: string) {

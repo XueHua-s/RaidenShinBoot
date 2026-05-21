@@ -6,8 +6,6 @@ dist
 .env.local
 .DS_Store
 .idea/
-.agents/
-.claude/
 .specs/
 coverage
 logs/
