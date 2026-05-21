@@ -8,9 +8,17 @@ import {
   upsertTelegramUser
 } from "@raiden/database";
 import { isMemoryRecallRequest } from "@raiden/shared";
-import { embedText, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
+import { embedText, generateMakotoImage, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
-import { resolveWebSearchForMessage } from "@raiden/shared/tools";
+import {
+  executeBootTool,
+  resolveWebSearchForMessage,
+  type BootToolContext,
+  type BootToolInput,
+  type BootToolName,
+  type BootToolOutput,
+  type BootToolPermissionContext
+} from "@raiden/shared/tools";
 import { enqueueMemoryEnrichment, getBootQueueConfig, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
 import {
   buildConversationCacheContextFingerprint,
@@ -113,6 +121,65 @@ export async function getEffectiveBootConfig() {
 
 export async function getEffectiveBootSearchConfig() {
   return getBootSearchConfig(await loadRuntimeEnv());
+}
+
+export type EffectiveBootToolOptions = {
+  permission?: BootToolPermissionContext;
+  audit?: BootToolContext["audit"];
+  fetch?: typeof fetch;
+  searchConfig?: BootToolContext["searchConfig"];
+  imageGenerator?: BootToolContext["imageGenerator"];
+};
+
+const searchBootToolNames = new Set<BootToolName>(["web_search", "google_search", "wikipedia_search", "moegirl_search"]);
+
+export async function getEffectiveBootToolContext(
+  nameOrOptions: BootToolName | EffectiveBootToolOptions = {},
+  maybeOptions: EffectiveBootToolOptions = {}
+): Promise<BootToolContext> {
+  const toolName = typeof nameOrOptions === "string" ? nameOrOptions : undefined;
+  const options = typeof nameOrOptions === "string" ? maybeOptions : nameOrOptions;
+  const context: BootToolContext = {};
+
+  if (options.searchConfig !== undefined) {
+    context.searchConfig = options.searchConfig;
+  } else if (toolName === undefined || searchBootToolNames.has(toolName)) {
+    context.loadSearchConfig = async () => getBootSearchConfig(await loadRuntimeEnv());
+  }
+
+  if (options.imageGenerator !== undefined) {
+    context.imageGenerator = options.imageGenerator;
+  } else if (toolName === undefined || toolName === "makoto_image") {
+    context.imageGenerator = async (input) => {
+      const bootConfig = getBootConfig(await loadRuntimeEnv());
+      return generateMakotoImage({
+        prompt: input.prompt,
+        size: input.size as `${number}x${number}`,
+        n: input.n,
+        config: bootConfig
+      });
+    };
+  }
+
+  if (options.permission !== undefined) {
+    context.permission = options.permission;
+  }
+  if (options.audit !== undefined) {
+    context.audit = options.audit;
+  }
+  if (options.fetch !== undefined) {
+    context.fetch = options.fetch;
+  }
+
+  return context;
+}
+
+export async function executeEffectiveBootTool<Name extends BootToolName>(
+  name: Name,
+  input: BootToolInput<Name>,
+  options: EffectiveBootToolOptions = {}
+): Promise<BootToolOutput<Name>> {
+  return executeBootTool(name, input, await getEffectiveBootToolContext(name, options));
 }
 
 export async function rememberBootUser(identity: BootUserIdentity) {

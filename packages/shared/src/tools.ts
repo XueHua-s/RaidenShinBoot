@@ -2,6 +2,8 @@ import {
   bootToolDescriptorSchema,
   bootToolSearchRequestSchema,
   bootToolSearchResponseSchema,
+  imageGenerationRequestSchema,
+  imageGenerationResponseSchema,
   webSearchRequestSchema,
   webSearchResponseSchema,
   type BootSearchChannel,
@@ -10,6 +12,8 @@ import {
   type BootToolExposure,
   type BootToolSearchRequest,
   type BootToolSearchResponse,
+  type ImageGenerationRequest,
+  type ImageGenerationResponse,
   type WebSearchRequest,
   type WebSearchResponse
 } from "./schemas.js";
@@ -24,10 +28,62 @@ import {
   type SearchWebOptions
 } from "./search.js";
 
+export type BootToolPermissionContext = {
+  actorId?: string | null;
+  chatId?: string | null;
+  allowedToolNames?: readonly string[];
+  deniedToolNames?: readonly string[];
+  requireExplicitAllowForDestructive?: boolean;
+};
+
+export type BootToolAuditEvent = {
+  toolName: string;
+  status: "completed" | "failed" | "denied";
+  durationMs: number;
+  readOnly: boolean;
+  destructive: boolean;
+  concurrencySafe: boolean;
+  actorId?: string | null;
+  chatId?: string | null;
+  inputSummary?: string;
+  resultSizeChars?: number;
+  error?: string;
+};
+
 export type BootToolContext = {
   searchConfig?: BootSearchConfig;
+  loadSearchConfig?: () => BootSearchConfig | Promise<BootSearchConfig>;
   fetch?: typeof fetch;
+  imageGenerator?: (input: ImageGenerationRequest) => Promise<ImageGenerationResponse>;
+  permission?: BootToolPermissionContext;
+  audit?: (event: BootToolAuditEvent) => void | Promise<void>;
 };
+
+export type BootToolValidationResult =
+  | { result: true }
+  | {
+      result: false;
+      message: string;
+      errorCode?: string | number;
+    };
+
+export type BootToolPermissionResult<Input> =
+  | { behavior: "allow"; input?: Input; reason?: string }
+  | { behavior: "deny"; message: string; reason?: string; statusCode?: number };
+
+export class BootToolRuntimeError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+  readonly toolName: string;
+
+  constructor(code: string, message: string, statusCode: number, toolName: string) {
+    super(message);
+    this.name = "BootToolRuntimeError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.toolName = toolName;
+  }
+}
 
 export type BootToolDefinition<Input, Output> = {
   name: string;
@@ -43,8 +99,25 @@ export type BootToolDefinition<Input, Output> = {
   resultBudgetChars: number;
   inputSchema: { parse: (input: unknown) => Input };
   outputSchema: { parse: (input: unknown) => Output };
+  inputSummary?: (input: Input) => string;
+  validateInput?: (input: Input, context?: BootToolContext) => BootToolValidationResult | Promise<BootToolValidationResult>;
+  checkPermissions?: (input: Input, context?: BootToolContext) => BootToolPermissionResult<Input> | Promise<BootToolPermissionResult<Input>>;
   budgetOutput?: (output: Output, budgetChars: number) => Output;
   execute: (input: Input, context?: BootToolContext) => Promise<Output>;
+};
+
+type BootToolDescriptorSource = {
+  name: string;
+  description: string;
+  searchHint: string;
+  exposure: BootToolExposure;
+  capabilities: BootToolCapability[];
+  channels: BootSearchChannel[];
+  readOnly: boolean;
+  destructive: boolean;
+  concurrencySafe: boolean;
+  maxResultCount: number;
+  resultBudgetChars: number;
 };
 
 export type WebSearchForMessageResult =
@@ -52,7 +125,11 @@ export type WebSearchForMessageResult =
   | { status: "completed"; response: WebSearchResponse; error: null }
   | { status: "failed"; response: null; error: string };
 
-const webSearchTool = {
+export function buildBootTool<Input, Output>(tool: BootToolDefinition<Input, Output>) {
+  return tool;
+}
+
+const webSearchTool = buildBootTool({
   name: "web_search",
   description: "Route a user query across Google-style web search, Wikipedia, and Moegirl according to intent.",
   searchHint: "intent router for web knowledge persona context",
@@ -66,13 +143,14 @@ const webSearchTool = {
   resultBudgetChars: 4000,
   inputSchema: webSearchRequestSchema,
   outputSchema: webSearchResponseSchema,
+  inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
   execute: async (input, context) => {
-    return searchWeb(input, searchOptions(context));
+    return searchWeb(input, await searchOptions(context));
   }
-} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>;
+} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
-const googleSearchTool = {
+const googleSearchTool = buildBootTool({
   name: "google_search",
   description: "Search the general web through the configured Google-compatible provider.",
   searchHint: "current news external sources google compatible",
@@ -86,11 +164,12 @@ const googleSearchTool = {
   resultBudgetChars: 4000,
   inputSchema: webSearchRequestSchema,
   outputSchema: webSearchResponseSchema,
+  inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchGoogle(input, searchOptions(context))
-} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>;
+  execute: async (input, context) => searchGoogle(input, await searchOptions(context))
+} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
-const wikipediaSearchTool = {
+const wikipediaSearchTool = buildBootTool({
   name: "wikipedia_search",
   description: "Search Chinese Wikipedia for encyclopedic background and factual context.",
   searchHint: "encyclopedia factual background definitions history",
@@ -104,11 +183,12 @@ const wikipediaSearchTool = {
   resultBudgetChars: 4000,
   inputSchema: webSearchRequestSchema,
   outputSchema: webSearchResponseSchema,
+  inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchWikipedia(input, searchOptions(context))
-} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>;
+  execute: async (input, context) => searchWikipedia(input, await searchOptions(context))
+} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
 
-const moegirlSearchTool = {
+const moegirlSearchTool = buildBootTool({
   name: "moegirl_search",
   description: "Search Moegirl for ACG characters, settings, plots, and persona-adjacent story context.",
   searchHint: "anime character setting plot genshin makoto persona",
@@ -122,28 +202,59 @@ const moegirlSearchTool = {
   resultBudgetChars: 4000,
   inputSchema: webSearchRequestSchema,
   outputSchema: webSearchResponseSchema,
+  inputSummary: (input) => input.query,
   budgetOutput: budgetWebSearchResponse,
-  execute: async (input, context) => searchMoegirl(input, searchOptions(context))
-} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>;
+  execute: async (input, context) => searchMoegirl(input, await searchOptions(context))
+} satisfies BootToolDefinition<WebSearchRequest, WebSearchResponse>);
+
+const makotoImageTool = buildBootTool({
+  name: "makoto_image",
+  description: "Generate a Raiden Makoto atmosphere image through the configured image provider.",
+  searchHint: "draw image illustration makoto atmosphere",
+  exposure: "direct",
+  capabilities: ["image", "generation", "persona_context"],
+  channels: [],
+  readOnly: false,
+  destructive: false,
+  concurrencySafe: true,
+  maxResultCount: 4,
+  resultBudgetChars: 8_000_000,
+  inputSchema: imageGenerationRequestSchema,
+  outputSchema: imageGenerationResponseSchema,
+  inputSummary: (input) => input.prompt,
+  budgetOutput: budgetImageGenerationResponse,
+  execute: async (input, context) => {
+    if (!context?.imageGenerator) {
+      throw new BootToolRuntimeError("tool_context_missing", "Image generation is not configured for this runtime.", 503, "makoto_image");
+    }
+
+    return context.imageGenerator(input);
+  }
+} satisfies BootToolDefinition<ImageGenerationRequest, ImageGenerationResponse>);
 
 const bootTools = {
   web_search: webSearchTool,
   google_search: googleSearchTool,
   wikipedia_search: wikipediaSearchTool,
-  moegirl_search: moegirlSearchTool
+  moegirl_search: moegirlSearchTool,
+  makoto_image: makotoImageTool
 } as const;
 
 export type BootToolName = keyof typeof bootTools;
 export type BootToolInput<Name extends BootToolName> = Parameters<(typeof bootTools)[Name]["execute"]>[0];
 export type BootToolOutput<Name extends BootToolName> = Awaited<ReturnType<(typeof bootTools)[Name]["execute"]>>;
 
+function getBootToolDescriptorsSource(): BootToolDescriptorSource[] {
+  return Object.values(bootTools);
+}
+
 export function listBootTools() {
-  return Object.values(bootTools).map(toBootToolDescriptor);
+  return getBootToolDescriptorsSource().map(toBootToolDescriptor);
 }
 
 export function searchBootTools(input: BootToolSearchRequest): BootToolSearchResponse {
   const { query, maxResults } = bootToolSearchRequestSchema.parse(input);
-  const tools = Object.values(bootTools);
+  const tools = getBootToolDescriptorsSource();
   const selectMatch = query.match(/^select:(.+)$/i);
 
   if (selectMatch) {
@@ -195,7 +306,7 @@ export function searchBootTools(input: BootToolSearchRequest): BootToolSearchRes
   });
 }
 
-function toBootToolDescriptor<Input, Output>(tool: BootToolDefinition<Input, Output>): BootToolDescriptor {
+function toBootToolDescriptor(tool: BootToolDescriptorSource): BootToolDescriptor {
   return bootToolDescriptorSchema.parse({
     name: tool.name,
     description: tool.description,
@@ -211,7 +322,7 @@ function toBootToolDescriptor<Input, Output>(tool: BootToolDefinition<Input, Out
   });
 }
 
-function searchableToolText<Input, Output>(tool: BootToolDefinition<Input, Output>) {
+function searchableToolText(tool: BootToolDescriptorSource) {
   return [
     tool.name,
     ...tool.name.split("_"),
@@ -224,7 +335,7 @@ function searchableToolText<Input, Output>(tool: BootToolDefinition<Input, Outpu
     .toLowerCase();
 }
 
-function scoreToolMatch<Input, Output>(tool: BootToolDefinition<Input, Output>, terms: string[]) {
+function scoreToolMatch(tool: BootToolDescriptorSource, terms: string[]) {
   const nameParts = tool.name.toLowerCase().split("_");
   const description = tool.description.toLowerCase();
   const searchHint = tool.searchHint.toLowerCase();
@@ -301,6 +412,175 @@ function budgetWebSearchResponse(output: WebSearchResponse, budgetChars: number)
   return budgeted;
 }
 
+function budgetImageGenerationResponse(output: ImageGenerationResponse, budgetChars: number): ImageGenerationResponse {
+  const budgeted: ImageGenerationResponse = {
+    images: output.images.map((image) => ({ ...image })),
+    warnings: output.warnings.map((warning) => trimForAudit(warning, 1000))
+  };
+  let droppedImages = 0;
+
+  while (outputSizeChars(budgeted) > budgetChars && budgeted.images.length > 1) {
+    budgeted.images.pop();
+    droppedImages += 1;
+  }
+
+  if (outputSizeChars(budgeted) > budgetChars && budgeted.warnings.length > 0) {
+    budgeted.warnings = [];
+  }
+
+  if (droppedImages > 0) {
+    budgeted.warnings.push(`Dropped ${droppedImages} generated image result(s) to stay within the tool output budget.`);
+    if (outputSizeChars(budgeted) > budgetChars) {
+      budgeted.warnings.pop();
+    }
+  }
+
+  if (outputSizeChars(budgeted) > budgetChars) {
+    throw new BootToolRuntimeError(
+      "tool_output_budget_exceeded",
+      "Image generation returned a result larger than the tool output budget.",
+      502,
+      "makoto_image"
+    );
+  }
+
+  return budgeted;
+}
+
+function toolInputSummary<Input, Output>(tool: BootToolDefinition<Input, Output>, input: Input) {
+  if (!tool.inputSummary) {
+    return undefined;
+  }
+
+  return trimForAudit(tool.inputSummary(input), 500);
+}
+
+function trimForAudit(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
+}
+
+function outputSizeChars(value: unknown) {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return String(value).length;
+  }
+}
+
+function hasToolName(list: readonly string[] | undefined, name: string) {
+  return Boolean(list?.some((item) => item.toLowerCase() === name.toLowerCase()));
+}
+
+function defaultPermissionCheck<Input, Output>(
+  tool: BootToolDefinition<Input, Output>,
+  input: Input,
+  context: BootToolContext | undefined
+): BootToolPermissionResult<Input> {
+  const permission = context?.permission;
+
+  if (hasToolName(permission?.deniedToolNames, tool.name)) {
+    return {
+      behavior: "deny",
+      message: `Tool ${tool.name} is denied by runtime policy.`,
+      reason: "denied_tool",
+      statusCode: 403
+    };
+  }
+
+  if (permission?.allowedToolNames && !hasToolName(permission.allowedToolNames, tool.name)) {
+    return {
+      behavior: "deny",
+      message: `Tool ${tool.name} is not allowed by runtime policy.`,
+      reason: "tool_not_allowed",
+      statusCode: 403
+    };
+  }
+
+  if (tool.destructive && permission?.requireExplicitAllowForDestructive && !hasToolName(permission.allowedToolNames, tool.name)) {
+    return {
+      behavior: "deny",
+      message: `Tool ${tool.name} requires explicit permission before destructive execution.`,
+      reason: "destructive_requires_allow",
+      statusCode: 403
+    };
+  }
+
+  return { behavior: "allow", input };
+}
+
+async function checkToolPermission<Input, Output>(
+  tool: BootToolDefinition<Input, Output>,
+  input: Input,
+  context: BootToolContext | undefined
+) {
+  const runtimePermission = defaultPermissionCheck(tool, input, context);
+  if (runtimePermission.behavior === "deny") {
+    return runtimePermission;
+  }
+
+  return tool.checkPermissions ? tool.checkPermissions(runtimePermission.input ?? input, context) : runtimePermission;
+}
+
+async function emitBootToolAudit(context: BootToolContext | undefined, event: BootToolAuditEvent) {
+  try {
+    await context?.audit?.(event);
+  } catch (error) {
+    console.warn("Boot tool audit hook failed.", error instanceof Error ? error.message : error);
+  }
+}
+
+function baseAuditEvent<Input, Output>(
+  tool: BootToolDefinition<Input, Output>,
+  context: BootToolContext | undefined,
+  startTime: number
+): BootToolAuditEvent {
+  const event: BootToolAuditEvent = {
+    toolName: tool.name,
+    status: "failed",
+    durationMs: Date.now() - startTime,
+    readOnly: tool.readOnly,
+    destructive: tool.destructive,
+    concurrencySafe: tool.concurrencySafe
+  };
+
+  const actorId = context?.permission?.actorId;
+  const chatId = context?.permission?.chatId;
+  if (actorId !== undefined) {
+    event.actorId = actorId;
+  }
+  if (chatId !== undefined) {
+    event.chatId = chatId;
+  }
+
+  return event;
+}
+
+export function getBootToolErrorStatus(error: unknown) {
+  if (error instanceof BootToolRuntimeError) {
+    return error.statusCode;
+  }
+
+  const statusCode = typeof error === "object" && error !== null && "statusCode" in error ? error.statusCode : undefined;
+  return typeof statusCode === "number" && Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599 ? statusCode : 500;
+}
+
+export function formatBootToolError(error: unknown) {
+  if (error instanceof BootToolRuntimeError) {
+    return error.message;
+  }
+
+  return error instanceof Error ? error.message : "Boot tool failed.";
+}
+
+function parseToolOutput<Input, Output>(tool: BootToolDefinition<Input, Output>, output: unknown) {
+  try {
+    return tool.outputSchema.parse(output);
+  } catch {
+    throw new BootToolRuntimeError("tool_output_schema_invalid", `Invalid output from tool ${tool.name}.`, 502, tool.name);
+  }
+}
+
 export async function executeBootTool<Name extends BootToolName>(
   name: Name,
   input: BootToolInput<Name>,
@@ -311,11 +591,67 @@ export async function executeBootTool<Name extends BootToolName>(
     throw new Error(`Unknown boot tool: ${name}`);
   }
 
-  const parsedInput = tool.inputSchema.parse(input);
-  const output = await tool.execute(parsedInput, context);
-  const parsedOutput = tool.outputSchema.parse(output);
-  const budgetedOutput = tool.budgetOutput ? tool.budgetOutput(parsedOutput, tool.resultBudgetChars) : parsedOutput;
-  return tool.outputSchema.parse(budgetedOutput) as BootToolOutput<Name>;
+  const startTime = Date.now();
+  let parsedInput: unknown;
+  try {
+    parsedInput = tool.inputSchema.parse(input);
+  } catch (error) {
+    const runtimeError = new BootToolRuntimeError("tool_input_schema_invalid", `Invalid input for tool ${tool.name}.`, 400, tool.name);
+    const event = baseAuditEvent(tool, context, startTime);
+    event.error = error instanceof Error ? error.message : "Input schema validation failed.";
+    await emitBootToolAudit(context, event);
+    throw runtimeError;
+  }
+
+  const inputSummary = toolInputSummary(tool, parsedInput);
+  const validation = await tool.validateInput?.(parsedInput, context);
+  if (validation?.result === false) {
+    const error = new BootToolRuntimeError("tool_input_invalid", validation.message, 400, tool.name);
+    const event = baseAuditEvent(tool, context, startTime);
+    event.error = error.message;
+    if (inputSummary) {
+      event.inputSummary = inputSummary;
+    }
+    await emitBootToolAudit(context, event);
+    throw error;
+  }
+
+  const permission = await checkToolPermission(tool, parsedInput, context);
+  if (permission.behavior === "deny") {
+    const error = new BootToolRuntimeError("tool_permission_denied", permission.message, permission.statusCode ?? 403, tool.name);
+    const event = baseAuditEvent(tool, context, startTime);
+    event.status = "denied";
+    event.error = error.message;
+    if (inputSummary) {
+      event.inputSummary = inputSummary;
+    }
+    await emitBootToolAudit(context, event);
+    throw error;
+  }
+
+  const executableInput = permission.input ?? parsedInput;
+  try {
+    const output = await tool.execute(executableInput, context);
+    const parsedOutput = parseToolOutput(tool, output);
+    const budgetedOutput = tool.budgetOutput ? tool.budgetOutput(parsedOutput, tool.resultBudgetChars) : parsedOutput;
+    const finalOutput = parseToolOutput(tool, budgetedOutput);
+    const event = baseAuditEvent(tool, context, startTime);
+    event.status = "completed";
+    event.resultSizeChars = outputSizeChars(finalOutput);
+    if (inputSummary) {
+      event.inputSummary = inputSummary;
+    }
+    await emitBootToolAudit(context, event);
+    return finalOutput as BootToolOutput<Name>;
+  } catch (error) {
+    const event = baseAuditEvent(tool, context, startTime);
+    event.error = error instanceof Error ? error.message : "Tool execution failed.";
+    if (inputSummary) {
+      event.inputSummary = inputSummary;
+    }
+    await emitBootToolAudit(context, event);
+    throw error;
+  }
 }
 
 export function formatWebSearchResultsForPrompt(output: WebSearchResponse) {
@@ -361,10 +697,12 @@ export async function maybeExecuteWebSearchForMessage(content: string, context?:
   return (await resolveWebSearchForMessage(content, context)).response;
 }
 
-function searchOptions(context: BootToolContext | undefined, defaults: Partial<SearchWebOptions> = {}) {
+async function searchOptions(context: BootToolContext | undefined, defaults: Partial<SearchWebOptions> = {}) {
   const options: SearchWebOptions = { ...defaults };
   if (context?.searchConfig) {
     options.config = context.searchConfig;
+  } else if (context?.loadSearchConfig) {
+    options.config = await context.loadSearchConfig();
   }
   if (context?.fetch) {
     options.fetch = context.fetch;

@@ -15,7 +15,8 @@
     "db:generate": "pnpm --filter @raiden/database db:generate",
     "db:migrate": "pnpm --filter @raiden/database db:migrate",
     "db:studio": "pnpm --filter @raiden/database db:studio",
-    "test:e2e": "tsx --conditions=source scripts/e2e-smoke.ts"
+    "test:e2e": "tsx --conditions=source scripts/e2e-smoke.ts",
+    "test:tools": "tsx --conditions=source scripts/boot-tool-runtime-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^22.18.12",

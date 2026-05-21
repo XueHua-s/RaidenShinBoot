@@ -17,7 +17,9 @@ export const bootToolCapabilitySchema = z.enum([
   "knowledge",
   "persona_context",
   "provider_specific",
-  "fallback_safe"
+  "fallback_safe",
+  "image",
+  "generation"
 ]);
 
 const emptyStringToNull = (value: unknown) => (value === "" ? null : value);
@@ -179,12 +181,12 @@ export const imageGenerationRequestSchema = z.object({
 });
 
 export const generatedImageSchema = z.object({
-  base64: z.string(),
-  mediaType: z.string()
+  base64: z.string().min(1),
+  mediaType: z.string().min(1)
 });
 
 export const imageGenerationResponseSchema = z.object({
-  images: z.array(generatedImageSchema).min(1),
+  images: z.array(generatedImageSchema).min(1).max(4),
   warnings: z.array(z.string())
 });
 
