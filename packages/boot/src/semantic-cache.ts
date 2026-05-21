@@ -263,6 +263,36 @@ export async function writeConversationCache(input: {
   }
 }
 
+export async function closeSemanticCache() {
+  const clientPromise = redisClientPromise;
+  redisClientPromise = null;
+  redisClientUrl = null;
+  redisClientGeneration += 1;
+  readyIndexes.clear();
+  unavailableIndexes.clear();
+
+  if (!clientPromise) {
+    return;
+  }
+
+  let client: RedisClientType;
+  try {
+    client = await clientPromise;
+  } catch {
+    return;
+  }
+
+  if (!client.isOpen) {
+    return;
+  }
+
+  try {
+    await client.quit();
+  } catch {
+    client.destroy();
+  }
+}
+
 async function readExactCache(context: LookupContext): Promise<ConversationCacheHit | null> {
   if (!context.config.l1Enabled) {
     return null;

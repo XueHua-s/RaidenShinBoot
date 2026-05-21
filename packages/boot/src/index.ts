@@ -49,6 +49,21 @@ type DurableMemoryInput = {
   bootConfig: Awaited<ReturnType<typeof getEffectiveBootConfig>>;
 };
 
+type CacheContextMessage = {
+  id?: string | undefined;
+  role: string;
+  content: string;
+  createdAt?: Date | string | undefined;
+};
+
+type CacheContextMemory = {
+  id: string;
+  summary: string;
+  importance: number;
+  sourceMessageId: string | null;
+  createdAt?: Date | string | undefined;
+};
+
 function storageUserId(identity: BootUserIdentity) {
   if (identity.protocol === "telegram") {
     return identity.userId;
@@ -121,12 +136,10 @@ export async function runBootConversation(input: BootConversationInput) {
     getRecentMessages(userId, 12),
     listMemories({ telegramUserId: userId, limit: 10, offset: 0 })
   ]);
-  const cacheContextFingerprint = buildConversationCacheContextFingerprint({
-    protocol: input.protocol,
-    userId: input.userId,
-    chatModel: bootConfig.BOOT_CHAT_MODEL,
-    embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
-    searchProvider: searchConfig.BOOT_SEARCH_PROVIDER,
+  const cacheContextFingerprint = buildCacheContextFingerprint({
+    identity: input,
+    bootConfig,
+    searchConfig,
     history: recentMessages,
     memories: cacheContextMemories
   });
@@ -141,7 +154,11 @@ export async function runBootConversation(input: BootConversationInput) {
     return saveCachedReply({
       input,
       userId,
-      hit: exactCache
+      hit: exactCache,
+      bootConfig,
+      searchConfig,
+      semanticCacheConfig,
+      cacheScope
     });
   }
   let cacheStatus: Extract<ConversationCacheStatus, "disabled" | "miss"> =
@@ -160,7 +177,12 @@ export async function runBootConversation(input: BootConversationInput) {
       return saveCachedReply({
         input,
         userId,
-        hit: semanticCache
+        hit: semanticCache,
+        bootConfig,
+        searchConfig,
+        semanticCacheConfig,
+        cacheScope,
+        embedding: queryEmbedding
       });
     }
     cacheStatus = semanticCache.status === "disabled" ? "disabled" : "miss";
@@ -211,18 +233,17 @@ export async function runBootConversation(input: BootConversationInput) {
     sourceMessageId: userMessage.id,
     bootConfig
   });
-  void writeConversationCache({
-    scope: cacheScope,
-    contextFingerprint: cacheContextFingerprint,
+  refreshConversationCacheInBackground({
+    identity: input,
+    userId,
+    bootConfig,
+    searchConfig,
+    semanticCacheConfig,
+    cacheScope,
     content: input.content,
     reply,
     embedding: queryEmbedding,
-    model: bootConfig.BOOT_CHAT_MODEL,
-    config: semanticCacheConfig
-  }).then((result) => {
-    if (result.status === "write_failed") {
-      console.warn("Semantic cache write failed.", result.reason);
-    }
+    warning: "Semantic cache write failed."
   });
 
   return {
@@ -241,12 +262,29 @@ async function saveCachedReply(input: {
   input: BootConversationInput;
   userId: string;
   hit: ConversationCacheHit;
+  bootConfig: ReturnType<typeof getBootConfig>;
+  searchConfig: ReturnType<typeof getBootSearchConfig>;
+  semanticCacheConfig: ReturnType<typeof getSemanticCacheConfig>;
+  cacheScope: string;
+  embedding?: number[] | undefined;
 }) {
   const { userMessage, assistantMessage } = await saveConversationTurn({
     telegramUserId: input.userId,
     telegramMessageId: input.input.sourceMessageId ?? null,
     userContent: input.input.content,
     assistantContent: input.hit.reply
+  });
+  refreshConversationCacheInBackground({
+    identity: input.input,
+    userId: input.userId,
+    bootConfig: input.bootConfig,
+    searchConfig: input.searchConfig,
+    semanticCacheConfig: input.semanticCacheConfig,
+    cacheScope: input.cacheScope,
+    content: input.input.content,
+    reply: input.hit.reply,
+    embedding: input.embedding,
+    warning: "Semantic cache refresh after hit failed."
   });
 
   return {
@@ -259,6 +297,67 @@ async function saveCachedReply(input: {
     userMessageId: userMessage.id,
     assistantMessageId: assistantMessage.id
   };
+}
+
+function buildCacheContextFingerprint(input: {
+  identity: BootUserIdentity;
+  bootConfig: ReturnType<typeof getBootConfig>;
+  searchConfig: ReturnType<typeof getBootSearchConfig>;
+  history: CacheContextMessage[];
+  memories: CacheContextMemory[];
+}) {
+  return buildConversationCacheContextFingerprint({
+    protocol: input.identity.protocol,
+    userId: input.identity.userId,
+    chatModel: input.bootConfig.BOOT_CHAT_MODEL,
+    embeddingModel: input.bootConfig.BOOT_EMBEDDING_MODEL,
+    searchProvider: input.searchConfig.BOOT_SEARCH_PROVIDER,
+    history: input.history,
+    memories: input.memories
+  });
+}
+
+function refreshConversationCacheInBackground(input: {
+  identity: BootUserIdentity;
+  userId: string;
+  bootConfig: ReturnType<typeof getBootConfig>;
+  searchConfig: ReturnType<typeof getBootSearchConfig>;
+  semanticCacheConfig: ReturnType<typeof getSemanticCacheConfig>;
+  cacheScope: string;
+  content: string;
+  reply: string;
+  embedding?: number[] | undefined;
+  warning: string;
+}) {
+  void (async () => {
+    // Reload the post-save context so cache keys match database ordering and memory side effects.
+    const [history, memories, embedding] = await Promise.all([
+      getRecentMessages(input.userId, 12),
+      listMemories({ telegramUserId: input.userId, limit: 10, offset: 0 }),
+      input.embedding ? Promise.resolve(input.embedding) : embedText(input.content, input.bootConfig)
+    ]);
+    const contextFingerprint = buildCacheContextFingerprint({
+      identity: input.identity,
+      bootConfig: input.bootConfig,
+      searchConfig: input.searchConfig,
+      history,
+      memories
+    });
+    const result = await writeConversationCache({
+      scope: input.cacheScope,
+      contextFingerprint,
+      content: input.content,
+      reply: input.reply,
+      embedding,
+      model: input.bootConfig.BOOT_CHAT_MODEL,
+      config: input.semanticCacheConfig
+    });
+    if (result.status === "write_failed") {
+      console.warn(input.warning, result.reason);
+    }
+  })().catch((error) => {
+    console.warn(input.warning, error instanceof Error ? error.message : error);
+  });
 }
 
 async function scheduleDurableMemoryIfUseful(

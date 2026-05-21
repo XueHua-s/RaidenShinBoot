@@ -1,13 +1,21 @@
 import {
   buildConversationCacheContextFingerprint,
+  closeSemanticCache,
+  conversationCacheScope,
+  getEffectiveBootConfig,
+  getEffectiveBootSearchConfig,
+  getSemanticCacheConfig,
   isStandaloneCacheCandidate,
-  processMemoryEnrichmentJob
+  lookupConversationCache,
+  processMemoryEnrichmentJob,
+  runBootConversation
 } from "@raiden/boot";
 import {
   closeDatabase,
   createAdminUser,
   countActiveSuperAdmins,
   deleteRuntimeSetting,
+  getRecentMessages,
   getSqlClient,
   listRuntimeSettings,
   listMemories,
@@ -34,6 +42,7 @@ async function main() {
   const server = createMockRelay(relayState);
   const port = await listen(server);
   const apiTelegramUserId = `e2e-api-${Date.now()}`;
+  const semanticCacheTelegramUserId = `e2e-cache-${Date.now()}`;
   const botUserNumericId = Date.now() % 1_000_000_000;
   const botTelegramUserId = String(botUserNumericId);
   const adminUsername = `e2e-admin-${Date.now()}`;
@@ -137,7 +146,7 @@ async function main() {
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from admin_users where username = ${adminUsername}`;
 
@@ -711,6 +720,49 @@ async function main() {
       throw new Error("Image prompt did not include the user request and Makoto visual guidance");
     }
 
+    const semanticCacheSmoke = await (async () => {
+      if (!process.env.REDIS_URL?.trim()) {
+        return { skipped: true as const };
+      }
+
+      const originalSemanticCacheEnabled = process.env.BOOT_SEMANTIC_CACHE_ENABLED;
+      const originalSemanticCacheNamespace = process.env.BOOT_SEMANTIC_CACHE_NAMESPACE;
+      const originalSemanticCacheTimeout = process.env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS;
+      process.env.BOOT_SEMANTIC_CACHE_ENABLED = "true";
+      process.env.BOOT_SEMANTIC_CACHE_NAMESPACE = `e2e-${Date.now()}`;
+      process.env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS = "5000";
+
+      try {
+        const cacheInput = {
+          protocol: "telegram" as const,
+          userId: semanticCacheTelegramUserId,
+          username: "e2e_cache_user",
+          content: "请温柔地说明这次验证链路"
+        };
+        const chatPromptCountBefore = relayState.chatPrompts.length;
+        const firstCacheChat = await runBootConversation(cacheInput);
+        if (firstCacheChat.cacheStatus !== "miss") {
+          throw new Error(`Semantic cache first chat should miss, got ${firstCacheChat.cacheStatus}`);
+        }
+        await waitForConversationExactCacheHit(cacheInput);
+
+        const secondCacheChat = await runBootConversation(cacheInput);
+        if (secondCacheChat.cacheStatus !== "l1_hit") {
+          throw new Error(`Semantic cache second chat should hit L1, got ${secondCacheChat.cacheStatus}`);
+        }
+        if (relayState.chatPrompts.length !== chatPromptCountBefore + 1) {
+          throw new Error("Semantic cache hit should not call the chat model again");
+        }
+        await waitForConversationExactCacheHit(cacheInput);
+
+        return { skipped: false as const, first: firstCacheChat.cacheStatus, second: secondCacheChat.cacheStatus };
+      } finally {
+        restoreEnv("BOOT_SEMANTIC_CACHE_ENABLED", originalSemanticCacheEnabled);
+        restoreEnv("BOOT_SEMANTIC_CACHE_NAMESPACE", originalSemanticCacheNamespace);
+        restoreEnv("BOOT_SEMANTIC_CACHE_TIMEOUT_MS", originalSemanticCacheTimeout);
+      }
+    })();
+
     console.log(
       JSON.stringify(
         {
@@ -736,6 +788,7 @@ async function main() {
           chatCompletionFailures: relayState.chatCompletionFailures,
           responsesPromptCount: relayState.responsesPrompts.length,
           summaryCount: relayState.summaries.length,
+          semanticCacheStatus: semanticCacheSmoke.skipped ? "skipped" : semanticCacheSmoke.second,
           lastSuperAdminGuardStatus,
           atomicSettingsGuardStatus: failedAtomicSettingsResponse.status,
           pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
@@ -749,7 +802,7 @@ async function main() {
       )
     );
   } finally {
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
@@ -764,6 +817,7 @@ async function main() {
         })
       )
     );
+    await closeSemanticCache();
     await closeDatabase();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
@@ -772,6 +826,43 @@ async function main() {
 }
 
 await main();
+
+async function waitForConversationExactCacheHit(input: Parameters<typeof runBootConversation>[0]) {
+  const deadline = Date.now() + 3_000;
+  let lastStatus = "unknown";
+
+  while (Date.now() < deadline) {
+    const [history, memories, bootConfig, searchConfig] = await Promise.all([
+      getRecentMessages(input.userId, 12),
+      listMemories({ telegramUserId: input.userId, limit: 10, offset: 0 }),
+      getEffectiveBootConfig(),
+      getEffectiveBootSearchConfig()
+    ]);
+    const contextFingerprint = buildConversationCacheContextFingerprint({
+      protocol: input.protocol,
+      userId: input.userId,
+      chatModel: bootConfig.BOOT_CHAT_MODEL,
+      embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
+      searchProvider: searchConfig.BOOT_SEARCH_PROVIDER,
+      history,
+      memories
+    });
+    const lookup = await lookupConversationCache({
+      scope: conversationCacheScope(input),
+      contextFingerprint,
+      content: input.content,
+      config: getSemanticCacheConfig(process.env)
+    });
+    lastStatus = lookup.status;
+    if (lookup.status === "l1_hit") {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Semantic cache exact entry was not ready before timeout; last status: ${lastStatus}`);
+}
 
 function restoreEnv(key: string, value: string | undefined) {
   if (value === undefined) {
