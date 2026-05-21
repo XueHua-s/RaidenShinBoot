@@ -18,6 +18,7 @@ RaidenShinBoot is a modern TypeScript monorepo for a Telegram bot whose core per
 pnpm install
 cp .env.example .env
 docker compose up -d postgres
+docker compose up -d redis
 pnpm db:generate
 pnpm db:migrate
 ADMIN_USERNAME=owner ADMIN_PASSWORD='replace-with-a-long-password' pnpm admin:bootstrap
@@ -28,6 +29,10 @@ pnpm dev:bot
 ```
 
 Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
+Set `REDIS_URL` to enable BullMQ jobs, Telegram webhook ingestion, and L1/L2 semantic response cache. Without Redis, local long polling still works and durable memory falls back to the original inline path. Webhook enqueue fails fast with a stable 503 after `BOOT_QUEUE_ENQUEUE_TIMEOUT_MS` when Redis is unavailable.
+For webhook mode, set `BOOT_TELEGRAM_WEBHOOK_SECRET`, configure Telegram to send updates to `POST /api/telegram/webhook` with that `secret_token`, set `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`, and run the worker with `pnpm --filter @raiden/bot dev:worker`.
+Optionally set `BOT_RUNTIME_MODE=polling` or `BOT_RUNTIME_MODE=worker` as a startup guard so the wrong process cannot be launched in a deployment slot.
+When testing the admin panel locally, keep the browser host and `VITE_API_BASE_URL` host consistent, for example `http://localhost:5173` with `http://localhost:8787` or `http://127.0.0.1:5173` with `http://127.0.0.1:8787`. Admin session cookies are host-bound, so mixing `localhost` and `127.0.0.1` can make authenticated panel requests look unauthorized.
 Create the first admin with `pnpm admin:bootstrap`; the command requires `ADMIN_USERNAME` and an `ADMIN_PASSWORD` of at least 12 characters and never creates a default production account.
 Set `BOOT_SETTINGS_ENCRYPTION_KEY` before saving relay keys in the admin System page; model names and base URLs can be managed without it, but secrets are rejected unless encrypted storage is ready.
 If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
@@ -47,6 +52,15 @@ The `bot` container is isolated behind a profile so local stacks can run without
 docker compose --profile app --profile bot up --build
 ```
 
+Webhook worker mode is available through the `bot-worker` service:
+
+```bash
+docker compose --profile app --profile worker up --build
+```
+
+In webhook mode, the Hono API only validates Telegram's secret token and enqueues the raw update. The worker consumes BullMQ jobs and runs the same grammY middleware stack used by long polling.
+The worker profile enables asynchronous memory enrichment; local polling keeps memory creation inline by default unless `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true` is set.
+
 `pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
 
 Image generation is available through:
@@ -60,6 +74,15 @@ Web search is available through:
 - API: `GET /api/search/tools` to inspect the Boot tool registry
 - Telegram: `/search Codex CLI 工具架构`
 - Chat auto-use: messages containing explicit search intent such as `联网搜索`, `查一下`, `最新`, or `新闻`
+
+Response cache behavior:
+
+- L1 exact cache: per-user normalized query match; no embedding or LLM call.
+- L2 semantic cache: Redis Stack vector search over the query embedding; default threshold is `0.92`.
+- L3 cold path: full boot conversation pipeline; successful standalone answers are cached for `BOOT_SEMANTIC_CACHE_TTL_SECONDS`.
+
+The cache is intentionally per user by default because replies can include persona, conversation, search, and private memory context. Explicit search/current-events requests, contextual follow-ups, memory recall, and memory/profile mutation requests are excluded from response caching. Cache reads and writes are best-effort and fail open after `BOOT_SEMANTIC_CACHE_TIMEOUT_MS`.
+Cache keys also include a conversation context fingerprint built from the active models, search provider, recent message window, and recent memory metadata, so a reply generated in one conversational state is not reused after the surrounding context changes.
 
 ## AI Relay Configuration
 

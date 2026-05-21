@@ -18,7 +18,10 @@
   },
   "dependencies": {
     "@raiden/database": "workspace:*",
-    "@raiden/shared": "workspace:*"
+    "@raiden/shared": "workspace:*",
+    "bullmq": "^5.76.10",
+    "redis": "^5.12.1",
+    "robot3": "^1.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.12",

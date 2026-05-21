@@ -1,8 +1,21 @@
 import {
+  buildConversationCacheContextFingerprint,
+  closeSemanticCache,
+  conversationCacheScope,
+  getEffectiveBootConfig,
+  getEffectiveBootSearchConfig,
+  getSemanticCacheConfig,
+  isStandaloneCacheCandidate,
+  lookupConversationCache,
+  processMemoryEnrichmentJob,
+  runBootConversation
+} from "@raiden/boot";
+import {
   closeDatabase,
   createAdminUser,
   countActiveSuperAdmins,
   deleteRuntimeSetting,
+  getRecentMessages,
   getSqlClient,
   listRuntimeSettings,
   listMemories,
@@ -29,6 +42,7 @@ async function main() {
   const server = createMockRelay(relayState);
   const port = await listen(server);
   const apiTelegramUserId = `e2e-api-${Date.now()}`;
+  const semanticCacheTelegramUserId = `e2e-cache-${Date.now()}`;
   const botUserNumericId = Date.now() % 1_000_000_000;
   const botTelegramUserId = String(botUserNumericId);
   const adminUsername = `e2e-admin-${Date.now()}`;
@@ -82,10 +96,62 @@ async function main() {
   process.env.BOOT_EMBEDDING_TIMEOUT_MS = "30000";
   process.env.BOOT_IMAGE_TIMEOUT_MS = "180000";
   process.env.BOOT_SEARCH_TIMEOUT_MS = "15000";
+  process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED = "false";
+  process.env.BOOT_SEMANTIC_CACHE_ENABLED = "false";
+
+  const baseCacheFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [],
+    memories: []
+  });
+  const changedHistoryFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [{ id: "m1", role: "assistant", content: "previous reply", createdAt: "2026-01-01T00:00:00.000Z" }],
+    memories: []
+  });
+  const changedMemoryFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    searchProvider: "disabled",
+    history: [],
+    memories: [
+      {
+        id: "memory-1",
+        summary: "用户喜欢稻妻茶点。",
+        importance: 6,
+        sourceMessageId: null,
+        createdAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  });
+  if (baseCacheFingerprint === changedHistoryFingerprint || baseCacheFingerprint === changedMemoryFingerprint) {
+    throw new Error("Conversation cache fingerprint should change when history or memory context changes");
+  }
+  if (isStandaloneCacheCandidate("继续说刚才那件事")) {
+    throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
+  }
+  for (const memoryMutationPrompt of ["请记住我喜欢苹果", "我的名字是小雪", "I like dango milk, please remember that"]) {
+    if (isStandaloneCacheCandidate(memoryMutationPrompt)) {
+      throw new Error(`Memory/profile mutation prompt should not be a semantic-cache candidate: ${memoryMutationPrompt}`);
+    }
+  }
+  if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
+    throw new Error("Standalone non-search prompts should be semantic-cache candidates");
+  }
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from admin_users where username = ${adminUsername}`;
 
@@ -161,6 +227,64 @@ async function main() {
     const health = await app.request("/api/health");
     if (!health.ok) {
       throw new Error(`Health check failed with ${health.status}`);
+    }
+
+    const originalWebhookSecret = process.env.BOOT_TELEGRAM_WEBHOOK_SECRET;
+    const originalRedisUrl = process.env.REDIS_URL;
+    const originalQueueEnqueueTimeout = process.env.BOOT_QUEUE_ENQUEUE_TIMEOUT_MS;
+    process.env.BOOT_TELEGRAM_WEBHOOK_SECRET = "e2e-webhook-secret";
+    process.env.REDIS_URL = "";
+    try {
+      const rejectedWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "wrong-secret"
+        },
+        body: JSON.stringify({ update_id: 9001 })
+      });
+      if (rejectedWebhook.status !== 401) {
+        throw new Error(`Telegram webhook should reject a wrong secret with 401, got ${rejectedWebhook.status}`);
+      }
+
+      const unavailableWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "e2e-webhook-secret"
+        },
+        body: JSON.stringify({ update_id: 9002 })
+      });
+      if (unavailableWebhook.status !== 503) {
+        throw new Error(`Telegram webhook should report queue unavailability with 503, got ${unavailableWebhook.status}`);
+      }
+      const unavailableWebhookPayload = (await unavailableWebhook.json()) as { error?: string };
+      if (unavailableWebhookPayload.error !== "Telegram webhook queue unavailable") {
+        throw new Error("Telegram webhook leaked an internal queue error instead of returning a stable public error");
+      }
+
+      process.env.REDIS_URL = "redis://127.0.0.1:1";
+      process.env.BOOT_QUEUE_ENQUEUE_TIMEOUT_MS = "250";
+      const failedRedisStartedAt = Date.now();
+      const failedRedisWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "e2e-webhook-secret"
+        },
+        body: JSON.stringify({ update_id: 9003 })
+      });
+      const failedRedisElapsedMs = Date.now() - failedRedisStartedAt;
+      if (failedRedisWebhook.status !== 503) {
+        throw new Error(`Telegram webhook should report Redis connection failure with 503, got ${failedRedisWebhook.status}`);
+      }
+      if (failedRedisElapsedMs > 2_000) {
+        throw new Error(`Telegram webhook Redis failure should fail fast, took ${failedRedisElapsedMs}ms`);
+      }
+    } finally {
+      restoreEnv("BOOT_TELEGRAM_WEBHOOK_SECRET", originalWebhookSecret);
+      restoreEnv("REDIS_URL", originalRedisUrl);
+      restoreEnv("BOOT_QUEUE_ENQUEUE_TIMEOUT_MS", originalQueueEnqueueTimeout);
     }
 
     const lastSuperAdminGuardStatus =
@@ -250,9 +374,30 @@ async function main() {
       throw new Error(`First chat route failed with ${firstChat.status}: ${await firstChat.text()}`);
     }
 
-    const firstPayload = (await firstChat.json()) as { reply?: string; memoryCount?: number };
+    const firstPayload = (await firstChat.json()) as { reply?: string; memoryCount?: number; cacheStatus?: string };
     if (!firstPayload.reply || typeof firstPayload.memoryCount !== "number") {
       throw new Error("First chat route returned an invalid payload");
+    }
+    if (firstPayload.cacheStatus !== "disabled") {
+      throw new Error(`Semantic cache should be disabled during E2E smoke, got ${firstPayload.cacheStatus ?? "missing"}`);
+    }
+
+    const memoryWorkerStrictFailure = await (async () => {
+      try {
+        await processMemoryEnrichmentJob({
+          userId: apiTelegramUserId,
+          displayName: "E2E",
+          content: "这是一条 E2E 链路 worker 严格失败传播验证。",
+          reply: "我会尝试提炼这条记忆。",
+          sourceMessageId: "not-a-valid-uuid"
+        });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!memoryWorkerStrictFailure) {
+      throw new Error("Memory enrichment worker should propagate persistence failures so BullMQ can retry");
     }
 
     const apiMemories = await listMemories({ telegramUserId: apiTelegramUserId, limit: 5, offset: 0 });
@@ -601,6 +746,49 @@ async function main() {
       throw new Error("Image prompt did not include the user request and Makoto visual guidance");
     }
 
+    const semanticCacheSmoke = await (async () => {
+      if (!process.env.REDIS_URL?.trim()) {
+        return { skipped: true as const };
+      }
+
+      const originalSemanticCacheEnabled = process.env.BOOT_SEMANTIC_CACHE_ENABLED;
+      const originalSemanticCacheNamespace = process.env.BOOT_SEMANTIC_CACHE_NAMESPACE;
+      const originalSemanticCacheTimeout = process.env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS;
+      process.env.BOOT_SEMANTIC_CACHE_ENABLED = "true";
+      process.env.BOOT_SEMANTIC_CACHE_NAMESPACE = `e2e-${Date.now()}`;
+      process.env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS = "5000";
+
+      try {
+        const cacheInput = {
+          protocol: "telegram" as const,
+          userId: semanticCacheTelegramUserId,
+          username: "e2e_cache_user",
+          content: "请温柔地说明这次验证链路"
+        };
+        const chatPromptCountBefore = relayState.chatPrompts.length;
+        const firstCacheChat = await runBootConversation(cacheInput);
+        if (firstCacheChat.cacheStatus !== "miss") {
+          throw new Error(`Semantic cache first chat should miss, got ${firstCacheChat.cacheStatus}`);
+        }
+        await waitForConversationExactCacheHit(cacheInput);
+
+        const secondCacheChat = await runBootConversation(cacheInput);
+        if (secondCacheChat.cacheStatus !== "l1_hit") {
+          throw new Error(`Semantic cache second chat should hit L1, got ${secondCacheChat.cacheStatus}`);
+        }
+        if (relayState.chatPrompts.length !== chatPromptCountBefore + 1) {
+          throw new Error("Semantic cache hit should not call the chat model again");
+        }
+        await waitForConversationExactCacheHit(cacheInput);
+
+        return { skipped: false as const, first: firstCacheChat.cacheStatus, second: secondCacheChat.cacheStatus };
+      } finally {
+        restoreEnv("BOOT_SEMANTIC_CACHE_ENABLED", originalSemanticCacheEnabled);
+        restoreEnv("BOOT_SEMANTIC_CACHE_NAMESPACE", originalSemanticCacheNamespace);
+        restoreEnv("BOOT_SEMANTIC_CACHE_TIMEOUT_MS", originalSemanticCacheTimeout);
+      }
+    })();
+
     console.log(
       JSON.stringify(
         {
@@ -626,6 +814,7 @@ async function main() {
           chatCompletionFailures: relayState.chatCompletionFailures,
           responsesPromptCount: relayState.responsesPrompts.length,
           summaryCount: relayState.summaries.length,
+          semanticCacheStatus: semanticCacheSmoke.skipped ? "skipped" : semanticCacheSmoke.second,
           lastSuperAdminGuardStatus,
           atomicSettingsGuardStatus: failedAtomicSettingsResponse.status,
           pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
@@ -639,7 +828,7 @@ async function main() {
       )
     );
   } finally {
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
@@ -654,6 +843,7 @@ async function main() {
         })
       )
     );
+    await closeSemanticCache();
     await closeDatabase();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
@@ -662,3 +852,48 @@ async function main() {
 }
 
 await main();
+
+async function waitForConversationExactCacheHit(input: Parameters<typeof runBootConversation>[0]) {
+  const deadline = Date.now() + 3_000;
+  let lastStatus = "unknown";
+
+  while (Date.now() < deadline) {
+    const [history, memories, bootConfig, searchConfig] = await Promise.all([
+      getRecentMessages(input.userId, 12),
+      listMemories({ telegramUserId: input.userId, limit: 10, offset: 0 }),
+      getEffectiveBootConfig(),
+      getEffectiveBootSearchConfig()
+    ]);
+    const contextFingerprint = buildConversationCacheContextFingerprint({
+      protocol: input.protocol,
+      userId: input.userId,
+      chatModel: bootConfig.BOOT_CHAT_MODEL,
+      embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
+      searchProvider: searchConfig.BOOT_SEARCH_PROVIDER,
+      history,
+      memories
+    });
+    const lookup = await lookupConversationCache({
+      scope: conversationCacheScope(input),
+      contextFingerprint,
+      content: input.content,
+      config: getSemanticCacheConfig(process.env)
+    });
+    lastStatus = lookup.status;
+    if (lookup.status === "l1_hit") {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Semantic cache exact entry was not ready before timeout; last status: ${lastStatus}`);
+}
+
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}

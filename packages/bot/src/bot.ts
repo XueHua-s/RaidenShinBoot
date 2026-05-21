@@ -1,0 +1,157 @@
+import { Bot, InputFile, type Context } from "grammy";
+import { sequentialize } from "@grammyjs/runner";
+import { getEffectiveBootConfig, getEffectiveBootSearchConfig } from "@raiden/boot";
+import { generateMakotoImage } from "@raiden/shared/boot";
+import { formatBootSearchError } from "@raiden/shared/search";
+import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
+import { enforceTelegramAccess } from "./access.js";
+import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
+
+const botCommands = [
+  { command: "start", description: "开始与雷电真对话" },
+  { command: "help", description: "查看可用指令" },
+  { command: "memory", description: "查看最近的长期记忆" },
+  { command: "recall", description: "按内容检索长期记忆" },
+  { command: "search", description: "联网搜索并返回来源" },
+  { command: "draw", description: "生成一张雷电真氛围图片" }
+];
+
+function updateConstraint(ctx: Context) {
+  if (ctx.chat?.id !== undefined) {
+    return `chat:${ctx.chat.id}`;
+  }
+  if (ctx.from?.id !== undefined) {
+    return `user:${ctx.from.id}`;
+  }
+
+  return undefined;
+}
+
+export function createRaidenBot(token: string) {
+  const bot = new Bot(token);
+
+  bot.use(sequentialize(updateConstraint));
+  bot.use(enforceTelegramAccess);
+
+  bot.command("start", async (ctx) => {
+    await rememberTelegramUser(ctx);
+    await ctx.reply(
+      "你好，旅行者。我是真。若你愿意，我会记住那些值得留在须臾里的事，也会在下一次雷光亮起时轻轻拾起它们。"
+    );
+  });
+
+  bot.command("help", async (ctx) => {
+    await ctx.reply(
+      [
+        "可以直接发消息与我交谈。",
+        "/memory 查看最近保存的长期记忆。",
+        "/recall 关键词 按语义检索与你有关的记忆。",
+        "/search 问题 联网搜索并返回来源。",
+        "/draw 描述 生成一张雷电真氛围图片。"
+      ].join("\n")
+    );
+  });
+
+  bot.command("memory", async (ctx) => {
+    const memories = await getMemoryList(ctx);
+    if (memories.length === 0) {
+      await ctx.reply("暂时还没有值得封存的记忆。慢慢来，重要的事总会自己发光。");
+      return;
+    }
+
+    await ctx.reply(memories.map((memory: { summary: string }, index: number) => `${index + 1}. ${memory.summary}`).join("\n"));
+  });
+
+  bot.command("recall", async (ctx) => {
+    const query = ctx.match.trim();
+    if (!query) {
+      await ctx.reply("请在 /recall 后写下想寻找的内容。");
+      return;
+    }
+
+    const memories = await recallMemories(ctx, query);
+    if (memories.length === 0) {
+      await ctx.reply("我没有找到相近的记忆。也许它还没有被我们认真说出口。");
+      return;
+    }
+
+    await ctx.reply(
+      memories
+        .map((memory: { summary: string; score: number }, index: number) => `${index + 1}. ${memory.summary}（相关度 ${memory.score.toFixed(2)}）`)
+        .join("\n")
+    );
+  });
+
+  bot.command("draw", async (ctx) => {
+    const prompt = ctx.match.trim();
+    if (!prompt) {
+      await ctx.reply("请在 /draw 后写下想生成的画面。");
+      return;
+    }
+
+    await ctx.replyWithChatAction("upload_photo");
+    const result = await generateMakotoImage({
+      prompt,
+      size: "1024x1024",
+      n: 1,
+      config: await getEffectiveBootConfig()
+    });
+    const image = result.images[0];
+    if (!image) {
+      await ctx.reply("这一次没有生成出图片。我们换一种描述再试。");
+      return;
+    }
+
+    await ctx.replyWithPhoto(new InputFile(Buffer.from(image.base64, "base64"), "raiden-makoto.png"), {
+      caption: "给你，一点温柔的雷光。"
+    });
+  });
+
+  bot.command("search", async (ctx) => {
+    const query = ctx.match.trim();
+    if (!query) {
+      await ctx.reply("请在 /search 后写下要搜索的内容。");
+      return;
+    }
+
+    await ctx.replyWithChatAction("typing");
+    try {
+      const result = await executeBootTool(
+        "web_search",
+        {
+          query,
+          maxResults: 5
+        },
+        {
+          searchConfig: await getEffectiveBootSearchConfig()
+        }
+      );
+      await ctx.reply(formatWebSearchResultsForTelegram(result), {
+        link_preview_options: { is_disabled: true }
+      });
+    } catch (error) {
+      await ctx.reply(`联网搜索暂不可用：${formatBootSearchError(error)}`);
+    }
+  });
+
+  bot.on("message:text", async (ctx) => {
+    const text = ctx.message.text.trim();
+    if (!text) {
+      return;
+    }
+
+    await ctx.replyWithChatAction("typing");
+    const result = await replyAsMakoto(ctx, text);
+    await ctx.reply(result.reply);
+  });
+
+  bot.catch((error) => {
+    console.error("Bot error", error);
+  });
+
+  return bot;
+}
+
+export async function setRaidenBotCommands(bot: Bot) {
+  await bot.api.setMyCommands(botCommands);
+}

@@ -791,6 +791,8 @@ export async function saveConversationTurn(input: {
   assistantContent: string;
 }) {
   const db = getDatabase();
+  const userMessageCreatedAt = new Date();
+  const assistantMessageCreatedAt = new Date(userMessageCreatedAt.getTime() + 1);
 
   return db.transaction(async (tx) => {
     const [existing] = await tx
@@ -820,7 +822,8 @@ export async function saveConversationTurn(input: {
         telegramUserId: input.telegramUserId,
         telegramMessageId: input.telegramMessageId ?? null,
         role: "user",
-        content: input.userContent
+        content: input.userContent,
+        createdAt: userMessageCreatedAt
       })
       .returning();
     const [assistantMessage] = await tx
@@ -829,7 +832,8 @@ export async function saveConversationTurn(input: {
         conversationId: conversation.id,
         telegramUserId: input.telegramUserId,
         role: "assistant",
-        content: input.assistantContent
+        content: input.assistantContent,
+        createdAt: assistantMessageCreatedAt
       })
       .returning();
 
@@ -879,7 +883,10 @@ export async function getRecentMessages(telegramUserId: string, limit = 12) {
     .select()
     .from(messages)
     .where(eq(messages.telegramUserId, telegramUserId))
-    .orderBy(desc(messages.createdAt))
+    .orderBy(
+      desc(messages.createdAt),
+      desc(sql<number>`case ${messages.role} when 'assistant' then 2 when 'system' then 1 else 0 end`)
+    )
     .limit(limit);
 
   return rows.reverse();

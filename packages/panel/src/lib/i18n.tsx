@@ -454,7 +454,7 @@ const dictionaries = { zh, en };
 
 type Variables = Record<string, string | number>;
 
-type I18nContextValue = {
+export type I18nContextValue = {
   locale: Locale;
   setLocale: (locale: Locale) => void;
   t: (key: TranslationKey, variables?: Variables) => string;
@@ -465,6 +465,7 @@ type I18nContextValue = {
   formatMessageRole: (value: string | null | undefined) => string;
   formatSearchProvider: (value: string | null | undefined) => string;
   formatDepth: (value: string | null | undefined) => string;
+  formatDate: (value: string | null | undefined) => string;
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);
@@ -507,6 +508,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   }, [locale]);
 
   const value = useMemo<I18nContextValue>(() => {
+    const dateFormatter = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
     const t = (key: TranslationKey, variables?: Variables) => interpolate(dictionaries[locale][key], variables);
     return {
       locale,
@@ -518,7 +525,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       formatChatType: (raw) => rawOrMapped(t, "chatType", raw),
       formatMessageRole: (raw) => rawOrMapped(t, "messageRole", raw),
       formatSearchProvider: (raw) => (raw === "disabled" ? t("provider.disabled") : raw ?? "-"),
-      formatDepth: (raw) => rawOrMapped(t, "depth", raw)
+      formatDepth: (raw) => rawOrMapped(t, "depth", raw),
+      formatDate: (raw) => (raw ? dateFormatter.format(new Date(raw)) : "-")
     };
   }, [locale]);
 

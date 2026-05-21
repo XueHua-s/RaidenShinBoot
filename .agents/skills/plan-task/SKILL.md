@@ -145,7 +145,7 @@ When `--refine` is used:
    ```bash
    # User edited the Architecture Overview section
    /plan .specs/tasks/todo/my-task.feature.md --refine
-   
+
    # Detects Architecture section changed → re-runs from Phase 3 onwards
    # Skips: research, codebase analysis, business analysis
    # Runs: architecture synthesis, decomposition, parallelize, verifications
