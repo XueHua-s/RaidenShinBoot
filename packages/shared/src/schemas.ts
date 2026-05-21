@@ -17,7 +17,9 @@ export const bootToolCapabilitySchema = z.enum([
   "knowledge",
   "persona_context",
   "provider_specific",
-  "fallback_safe"
+  "fallback_safe",
+  "image",
+  "generation"
 ]);
 
 const emptyStringToNull = (value: unknown) => (value === "" ? null : value);

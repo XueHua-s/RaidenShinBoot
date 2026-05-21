@@ -1,9 +1,7 @@
 import { Bot, InputFile, type Context } from "grammy";
 import { sequentialize } from "@grammyjs/runner";
-import { getEffectiveBootConfig, getEffectiveBootSearchConfig } from "@raiden/boot";
-import { generateMakotoImage } from "@raiden/shared/boot";
-import { formatBootSearchError } from "@raiden/shared/search";
-import { executeBootTool, formatWebSearchResultsForTelegram } from "@raiden/shared/tools";
+import { executeEffectiveBootTool } from "@raiden/boot";
+import { formatBootToolError, formatWebSearchResultsForTelegram, type BootToolPermissionContext } from "@raiden/shared/tools";
 import { enforceTelegramAccess } from "./access.js";
 import { getMemoryList, recallMemories, rememberTelegramUser, replyAsMakoto } from "./conversation.js";
 
@@ -25,6 +23,13 @@ function updateConstraint(ctx: Context) {
   }
 
   return undefined;
+}
+
+function telegramToolPermission(ctx: Context): BootToolPermissionContext {
+  return {
+    actorId: ctx.from?.id === undefined ? null : String(ctx.from.id),
+    chatId: ctx.chat?.id === undefined ? null : String(ctx.chat.id)
+  };
 }
 
 export function createRaidenBot(token: string) {
@@ -90,21 +95,30 @@ export function createRaidenBot(token: string) {
     }
 
     await ctx.replyWithChatAction("upload_photo");
-    const result = await generateMakotoImage({
-      prompt,
-      size: "1024x1024",
-      n: 1,
-      config: await getEffectiveBootConfig()
-    });
-    const image = result.images[0];
-    if (!image) {
-      await ctx.reply("这一次没有生成出图片。我们换一种描述再试。");
-      return;
-    }
+    try {
+      const result = await executeEffectiveBootTool(
+        "makoto_image",
+        {
+          prompt,
+          size: "1024x1024",
+          n: 1
+        },
+        {
+          permission: telegramToolPermission(ctx)
+        }
+      );
+      const image = result.images[0];
+      if (!image) {
+        await ctx.reply("这一次没有生成出图片。我们换一种描述再试。");
+        return;
+      }
 
-    await ctx.replyWithPhoto(new InputFile(Buffer.from(image.base64, "base64"), "raiden-makoto.png"), {
-      caption: "给你，一点温柔的雷光。"
-    });
+      await ctx.replyWithPhoto(new InputFile(Buffer.from(image.base64, "base64"), "raiden-makoto.png"), {
+        caption: "给你，一点温柔的雷光。"
+      });
+    } catch (error) {
+      await ctx.reply(`图片生成暂不可用：${formatBootToolError(error)}`);
+    }
   });
 
   bot.command("search", async (ctx) => {
@@ -116,21 +130,21 @@ export function createRaidenBot(token: string) {
 
     await ctx.replyWithChatAction("typing");
     try {
-      const result = await executeBootTool(
+      const result = await executeEffectiveBootTool(
         "web_search",
         {
           query,
           maxResults: 5
         },
         {
-          searchConfig: await getEffectiveBootSearchConfig()
+          permission: telegramToolPermission(ctx)
         }
       );
       await ctx.reply(formatWebSearchResultsForTelegram(result), {
         link_preview_options: { is_disabled: true }
       });
     } catch (error) {
-      await ctx.reply(`联网搜索暂不可用：${formatBootSearchError(error)}`);
+      await ctx.reply(`联网搜索暂不可用：${formatBootToolError(error)}`);
     }
   });
 

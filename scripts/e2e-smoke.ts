@@ -521,13 +521,15 @@ async function main() {
     const tools = toolsPayload.tools ?? [];
     const webTool = tools.find((tool) => tool.name === "web_search");
     const googleTool = tools.find((tool) => tool.name === "google_search");
+    const imageTool = tools.find((tool) => tool.name === "makoto_image");
     if (
       !webTool ||
       !googleTool ||
+      !imageTool ||
       !tools.some((tool) => tool.name === "wikipedia_search") ||
       !tools.some((tool) => tool.name === "moegirl_search")
     ) {
-      throw new Error("Boot tool registry did not expose routed and specialized search tools");
+      throw new Error("Boot tool registry did not expose routed search, specialized search, and image tools");
     }
     if (
       webTool.exposure !== "direct" ||
@@ -538,6 +540,16 @@ async function main() {
       !webTool.capabilities.includes("router")
     ) {
       throw new Error("Boot tool registry did not expose expected safety and discovery metadata");
+    }
+    if (
+      imageTool.exposure !== "direct" ||
+      imageTool.readOnly ||
+      imageTool.destructive ||
+      !imageTool.concurrencySafe ||
+      !imageTool.capabilities.includes("image") ||
+      !imageTool.capabilities.includes("generation")
+    ) {
+      throw new Error("Boot tool registry did not expose expected image tool metadata");
     }
 
     const exactToolSearchResponse = await authedRequest("/api/search/tools/search", {

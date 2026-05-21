@@ -8,9 +8,17 @@ import {
   upsertTelegramUser
 } from "@raiden/database";
 import { isMemoryRecallRequest } from "@raiden/shared";
-import { embedText, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
+import { embedText, generateMakotoImage, generateMakotoReply, getBootConfig, summarizeForMemory } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
-import { resolveWebSearchForMessage } from "@raiden/shared/tools";
+import {
+  executeBootTool,
+  resolveWebSearchForMessage,
+  type BootToolContext,
+  type BootToolInput,
+  type BootToolName,
+  type BootToolOutput,
+  type BootToolPermissionContext
+} from "@raiden/shared/tools";
 import { enqueueMemoryEnrichment, getBootQueueConfig, isBootQueueConfigured, type MemoryEnrichmentJob } from "./jobs.js";
 import {
   buildConversationCacheContextFingerprint,
@@ -113,6 +121,47 @@ export async function getEffectiveBootConfig() {
 
 export async function getEffectiveBootSearchConfig() {
   return getBootSearchConfig(await loadRuntimeEnv());
+}
+
+export type EffectiveBootToolOptions = {
+  permission?: BootToolPermissionContext;
+  audit?: BootToolContext["audit"];
+  fetch?: typeof fetch;
+};
+
+export async function getEffectiveBootToolContext(options: EffectiveBootToolOptions = {}): Promise<BootToolContext> {
+  const runtimeEnv = await loadRuntimeEnv();
+  const bootConfig = getBootConfig(runtimeEnv);
+  const context: BootToolContext = {
+    searchConfig: getBootSearchConfig(runtimeEnv),
+    imageGenerator: (input) =>
+      generateMakotoImage({
+        prompt: input.prompt,
+        size: input.size as `${number}x${number}`,
+        n: input.n,
+        config: bootConfig
+      })
+  };
+
+  if (options.permission !== undefined) {
+    context.permission = options.permission;
+  }
+  if (options.audit !== undefined) {
+    context.audit = options.audit;
+  }
+  if (options.fetch !== undefined) {
+    context.fetch = options.fetch;
+  }
+
+  return context;
+}
+
+export async function executeEffectiveBootTool<Name extends BootToolName>(
+  name: Name,
+  input: BootToolInput<Name>,
+  options: EffectiveBootToolOptions = {}
+): Promise<BootToolOutput<Name>> {
+  return executeBootTool(name, input, await getEffectiveBootToolContext(options));
 }
 
 export async function rememberBootUser(identity: BootUserIdentity) {
