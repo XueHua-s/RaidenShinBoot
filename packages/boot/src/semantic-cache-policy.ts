@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isMemoryRecallRequest } from "@raiden/shared";
+import { isMemoryMutationRequest, isMemoryRecallRequest } from "@raiden/shared";
 import { shouldUseBootSearchForMessage } from "@raiden/shared/tools";
 
 export const conversationCachePolicyVersion = "conversation-cache-v2";
@@ -39,7 +39,13 @@ export function normalizeCacheQuery(content: string) {
 
 export function isStandaloneCacheCandidate(content: string) {
   const normalized = normalizeCacheQuery(content);
-  if (!normalized || normalized.startsWith("/") || isMemoryRecallRequest(normalized) || shouldUseBootSearchForMessage(normalized)) {
+  if (
+    !normalized ||
+    normalized.startsWith("/") ||
+    isMemoryRecallRequest(normalized) ||
+    isMemoryMutationRequest(normalized) ||
+    shouldUseBootSearchForMessage(normalized)
+  ) {
     return false;
   }
   if (contextualCjkQueryPattern.test(normalized) || contextualEnglishQueryPattern.test(normalized)) {

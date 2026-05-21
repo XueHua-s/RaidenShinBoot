@@ -140,6 +140,11 @@ async function main() {
   if (isStandaloneCacheCandidate("继续说刚才那件事")) {
     throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
   }
+  for (const memoryMutationPrompt of ["请记住我喜欢苹果", "我的名字是小雪", "I like dango milk, please remember that"]) {
+    if (isStandaloneCacheCandidate(memoryMutationPrompt)) {
+      throw new Error(`Memory/profile mutation prompt should not be a semantic-cache candidate: ${memoryMutationPrompt}`);
+    }
+  }
   if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
     throw new Error("Standalone non-search prompts should be semantic-cache candidates");
   }
@@ -226,6 +231,7 @@ async function main() {
 
     const originalWebhookSecret = process.env.BOOT_TELEGRAM_WEBHOOK_SECRET;
     const originalRedisUrl = process.env.REDIS_URL;
+    const originalQueueEnqueueTimeout = process.env.BOOT_QUEUE_ENQUEUE_TIMEOUT_MS;
     process.env.BOOT_TELEGRAM_WEBHOOK_SECRET = "e2e-webhook-secret";
     process.env.REDIS_URL = "";
     try {
@@ -256,9 +262,29 @@ async function main() {
       if (unavailableWebhookPayload.error !== "Telegram webhook queue unavailable") {
         throw new Error("Telegram webhook leaked an internal queue error instead of returning a stable public error");
       }
+
+      process.env.REDIS_URL = "redis://127.0.0.1:1";
+      process.env.BOOT_QUEUE_ENQUEUE_TIMEOUT_MS = "250";
+      const failedRedisStartedAt = Date.now();
+      const failedRedisWebhook = await app.request("/api/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-telegram-bot-api-secret-token": "e2e-webhook-secret"
+        },
+        body: JSON.stringify({ update_id: 9003 })
+      });
+      const failedRedisElapsedMs = Date.now() - failedRedisStartedAt;
+      if (failedRedisWebhook.status !== 503) {
+        throw new Error(`Telegram webhook should report Redis connection failure with 503, got ${failedRedisWebhook.status}`);
+      }
+      if (failedRedisElapsedMs > 2_000) {
+        throw new Error(`Telegram webhook Redis failure should fail fast, took ${failedRedisElapsedMs}ms`);
+      }
     } finally {
       restoreEnv("BOOT_TELEGRAM_WEBHOOK_SECRET", originalWebhookSecret);
       restoreEnv("REDIS_URL", originalRedisUrl);
+      restoreEnv("BOOT_QUEUE_ENQUEUE_TIMEOUT_MS", originalQueueEnqueueTimeout);
     }
 
     const lastSuperAdminGuardStatus =

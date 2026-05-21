@@ -1,4 +1,4 @@
-import { enqueueTelegramUpdate } from "@raiden/boot";
+import { BootQueueUnavailableError, enqueueTelegramUpdate } from "@raiden/boot";
 import { Hono } from "hono";
 
 function webhookSecret() {
@@ -29,7 +29,7 @@ export const telegramWebhookRoute = new Hono().post("/", async (c) => {
     return c.json({ ok: true, jobId: job.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const status = /REDIS_URL/.test(message) ? 503 : 400;
+    const status = error instanceof BootQueueUnavailableError ? 503 : 400;
     console.warn("Telegram webhook enqueue failed.", message);
     return c.json(
       {
