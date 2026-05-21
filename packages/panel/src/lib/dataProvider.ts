@@ -6,7 +6,16 @@ import type {
   GetListParams,
   GetListResponse
 } from "@refinedev/core";
-import type { MemoryDto, MessageDto, TelegramUserDto } from "@raiden/shared";
+import type {
+  AdminSessionDto,
+  AdminUserDto,
+  AuditLogDto,
+  MemoryDto,
+  MessageDto,
+  TelegramChatDto,
+  TelegramCommandPermissionDto,
+  TelegramUserDto
+} from "@raiden/shared";
 import { apiClient, apiBaseUrl, readJson } from "./apiClient.js";
 
 type ListResponse<T> = {
@@ -46,6 +55,36 @@ export const dataProvider: DataProvider = {
     if (params.resource === "memories") {
       const response = await apiClient.api.memories.$get({ query });
       const payload = await readJson<ListResponse<MemoryDto>>(response);
+      return payload as unknown as GetListResponse<TData>;
+    }
+
+    if (params.resource === "telegram-chats") {
+      const response = await apiClient.api.telegram.chats.$get({ query });
+      const payload = await readJson<ListResponse<TelegramChatDto>>(response);
+      return payload as unknown as GetListResponse<TData>;
+    }
+
+    if (params.resource === "telegram-command-permissions") {
+      const response = await apiClient.api.telegram["command-permissions"].$get({ query });
+      const payload = await readJson<ListResponse<TelegramCommandPermissionDto>>(response);
+      return payload as unknown as GetListResponse<TData>;
+    }
+
+    if (params.resource === "admin-users") {
+      const response = await apiClient.api["admin-users"].$get({ query });
+      const payload = await readJson<ListResponse<AdminUserDto>>(response);
+      return payload as unknown as GetListResponse<TData>;
+    }
+
+    if (params.resource === "admin-sessions") {
+      const response = await apiClient.api["admin-sessions"].$get({ query });
+      const payload = await readJson<ListResponse<AdminSessionDto>>(response);
+      return payload as unknown as GetListResponse<TData>;
+    }
+
+    if (params.resource === "audit-logs") {
+      const response = await apiClient.api["audit-logs"].$get({ query });
+      const payload = await readJson<ListResponse<AuditLogDto>>(response);
       return payload as unknown as GetListResponse<TData>;
     }
 

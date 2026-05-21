@@ -16,7 +16,12 @@ createRoot(document.getElementById("root")!).render(
         resources={[
           { name: "users", list: "/" },
           { name: "messages", list: "/" },
-          { name: "memories", list: "/" }
+          { name: "memories", list: "/" },
+          { name: "telegram-chats", list: "/telegram" },
+          { name: "telegram-command-permissions", list: "/telegram" },
+          { name: "admin-users", list: "/security" },
+          { name: "admin-sessions", list: "/security" },
+          { name: "audit-logs", list: "/audit" }
         ]}
         options={{
           syncWithLocation: false,

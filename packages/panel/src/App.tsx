@@ -18,8 +18,9 @@ import {
   Users,
   Zap
 } from "lucide-react";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { Navigate, NavLink, Outlet, Route, Routes, useNavigate } from "react-router-dom";
+import { useList, type BaseRecord } from "@refinedev/core";
 import type {
   AdminSessionDto,
   AdminUserDto,
@@ -40,12 +41,7 @@ import { Input, Label, Textarea } from "./components/ui/input.js";
 import { Table, Td, Th } from "./components/ui/table.js";
 import { apiClient, readJson, setCsrfToken } from "./lib/apiClient.js";
 import { I18nProvider, useI18n, type TranslationKey } from "./lib/i18n.js";
-import { cn, errorMessage, formatDate } from "./lib/utils.js";
-
-type ListPayload<T> = {
-  data: T[];
-  total: number;
-};
+import { cn, errorMessage } from "./lib/utils.js";
 
 type AuthState = {
   user: AdminUserDto | null;
@@ -124,12 +120,12 @@ function LanguageSwitcher() {
   const { locale, setLocale, t } = useI18n();
 
   return (
-    <div className="inline-flex h-9 items-center gap-1 rounded-md border border-zinc-300 bg-white p-1">
+    <div className="inline-flex h-9 shrink-0 items-center gap-1 rounded-md border border-zinc-300 bg-white p-1">
       <Languages className="ml-2 size-4 text-cyan-700" />
       {(["zh", "en"] as const).map((value) => (
         <button
           className={cn(
-            "h-7 rounded px-2 text-xs font-semibold transition",
+            "h-7 whitespace-nowrap rounded px-2 text-xs font-semibold transition",
             locale === value ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-zinc-100"
           )}
           key={value}
@@ -173,7 +169,7 @@ function LoginPage({ onLogin }: { onLogin: (user: AdminUserDto, csrfToken: strin
     <main className="grid min-h-screen bg-[var(--app-bg)] text-zinc-950 lg:grid-cols-[minmax(360px,0.9fr)_1.1fr]">
       <section className="flex min-h-screen items-center justify-center px-6 py-10">
         <div className="w-full max-w-md">
-          <div className="mb-8 flex items-center gap-3">
+          <div className="mb-8 flex flex-wrap items-center gap-3">
             <div className="grid size-11 place-items-center rounded-lg bg-zinc-950 text-cyan-300">
               <Shield className="size-5" />
             </div>
@@ -181,7 +177,7 @@ function LoginPage({ onLogin }: { onLogin: (user: AdminUserDto, csrfToken: strin
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-700">RaidenShinBoot</p>
               <h1 className="text-2xl font-semibold tracking-normal text-zinc-950">{t("login.productName")}</h1>
             </div>
-            <div className="ml-auto">
+            <div className="ml-auto flex max-[420px]:ml-0 max-[420px]:w-full max-[420px]:justify-end">
               <LanguageSwitcher />
             </div>
           </div>
@@ -243,6 +239,7 @@ function LoginPage({ onLogin }: { onLogin: (user: AdminUserDto, csrfToken: strin
 function AppShell({ user, onLogout }: AppShellProps) {
   const { t, formatRole } = useI18n();
   const navigate = useNavigate();
+  const visibleNavItems = useMemo(() => navItems.filter((item) => canSee(item, user)), [user.role]);
 
   async function logout() {
     await onLogout();
@@ -262,7 +259,7 @@ function AppShell({ user, onLogout }: AppShellProps) {
           </div>
         </div>
         <nav className="grid gap-1 p-3">
-          {navItems.filter((item) => canSee(item, user)).map((item) => (
+          {visibleNavItems.map((item) => (
             <NavLink
               className={({ isActive }) =>
                 cn(
@@ -298,7 +295,7 @@ function AppShell({ user, onLogout }: AppShellProps) {
             </div>
           </div>
           <nav className="flex gap-1 overflow-x-auto px-4 pb-3 lg:hidden">
-            {navItems.filter((item) => canSee(item, user)).map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink
                 className={({ isActive }) =>
                   cn(
@@ -310,7 +307,7 @@ function AppShell({ user, onLogout }: AppShellProps) {
                 key={item.to}
                 to={item.to}
               >
-              <item.icon className="size-4" />
+                <item.icon className="size-4" />
                 {t(item.labelKey)}
               </NavLink>
             ))}
@@ -353,68 +350,56 @@ function MetricCard({
   );
 }
 
-function useListLoader<T>(loader: () => Promise<ListPayload<T>>, deps: unknown[] = []) {
-  const [data, setData] = useState<T[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+function useResourceList<T extends BaseRecord>(resource: string, pageSize: number) {
+  const result = useList<T>({
+    resource,
+    pagination: { current: 1, pageSize, mode: "server" },
+    queryOptions: { retry: false }
+  });
+  const { refetch } = result;
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const payload = await loader();
-      setData(payload.data);
-      setTotal(payload.total);
-    } catch (requestError) {
-      setError(errorMessage(requestError));
-    } finally {
-      setLoading(false);
-    }
-  }, deps);
+  const reload = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  return { data, total, loading, error, reload: load };
+  return {
+    data: result.data?.data ?? [],
+    total: result.data?.total ?? 0,
+    loading: result.isFetching,
+    error: result.error ? errorMessage(result.error) : null,
+    reload
+  };
 }
 
 function DashboardPage() {
-  const { t, formatStatus } = useI18n();
+  const { t, formatStatus, formatDate } = useI18n();
   const [system, setSystem] = useState<SystemStatus | null>(null);
-  const [users, setUsers] = useState<ListPayload<TelegramUserDto>>({ data: [], total: 0 });
-  const [messages, setMessages] = useState<ListPayload<MessageDto>>({ data: [], total: 0 });
-  const [memories, setMemories] = useState<ListPayload<MemoryDto>>({ data: [], total: 0 });
-  const [chats, setChats] = useState<ListPayload<TelegramChatDto>>({ data: [], total: 0 });
-  const [audit, setAudit] = useState<ListPayload<AuditLogDto>>({ data: [], total: 0 });
-  const [error, setError] = useState<string | null>(null);
+  const [systemError, setSystemError] = useState<string | null>(null);
+  const users = useResourceList<TelegramUserDto>("users", 5);
+  const messages = useResourceList<MessageDto>("messages", 5);
+  const memories = useResourceList<MemoryDto>("memories", 5);
+  const chats = useResourceList<TelegramChatDto>("telegram-chats", 5);
+  const audit = useResourceList<AuditLogDto>("audit-logs", 5);
 
   const load = useCallback(async () => {
-    setError(null);
+    setSystemError(null);
     try {
-      const [systemResponse, usersResponse, messagesResponse, memoriesResponse, chatsResponse, auditResponse] = await Promise.all([
-        apiClient.api.system.status.$get(),
-        apiClient.api.users.$get({ query: { limit: "5", offset: "0" } }),
-        apiClient.api.messages.$get({ query: { limit: "5", offset: "0" } }),
-        apiClient.api.memories.$get({ query: { limit: "5", offset: "0" } }),
-        apiClient.api.telegram.chats.$get({ query: { limit: "5", offset: "0" } }),
-        apiClient.api["audit-logs"].$get({ query: { limit: "5", offset: "0" } })
-      ]);
+      const systemResponse = await apiClient.api.system.status.$get();
       setSystem(await readJson<SystemStatus>(systemResponse));
-      setUsers(await readJson<ListPayload<TelegramUserDto>>(usersResponse));
-      setMessages(await readJson<ListPayload<MessageDto>>(messagesResponse));
-      setMemories(await readJson<ListPayload<MemoryDto>>(memoriesResponse));
-      setChats(await readJson<ListPayload<TelegramChatDto>>(chatsResponse));
-      setAudit(await readJson<ListPayload<AuditLogDto>>(auditResponse));
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setSystemError(errorMessage(requestError));
     }
   }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([load(), users.reload(), messages.reload(), memories.reload(), chats.reload(), audit.reload()]);
+  }, [audit.reload, chats.reload, load, memories.reload, messages.reload, users.reload]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const error = systemError ?? users.error ?? messages.error ?? memories.error ?? chats.error ?? audit.error;
 
   return (
     <div className="grid gap-5">
@@ -423,7 +408,7 @@ function DashboardPage() {
           <h2 className="text-xl font-semibold text-zinc-950">{t("dashboard.title")}</h2>
           <p className="mt-1 text-sm text-zinc-500">{t("dashboard.description")}</p>
         </div>
-        <Button onClick={load} variant="outline">
+        <Button onClick={refresh} variant="outline">
           <RefreshCw className="size-4" />
           {t("common.refresh")}
         </Button>
@@ -485,17 +470,9 @@ function DashboardPage() {
 }
 
 function TelegramPage() {
-  const { t, formatStatus, formatPolicy, formatChatType } = useI18n();
-  const loader = useCallback(async () => {
-    const response = await apiClient.api.telegram.chats.$get({ query: { limit: "50", offset: "0" } });
-    return readJson<ListPayload<TelegramChatDto>>(response);
-  }, []);
-  const commandLoader = useCallback(async () => {
-    const response = await apiClient.api.telegram["command-permissions"].$get({ query: { limit: "100", offset: "0" } });
-    return readJson<ListPayload<TelegramCommandPermissionDto>>(response);
-  }, []);
-  const { data, total, loading, error, reload } = useListLoader(loader, [loader]);
-  const commandPermissions = useListLoader(commandLoader, [commandLoader]);
+  const { t, formatStatus, formatPolicy, formatChatType, formatDate } = useI18n();
+  const { data, total, loading, error, reload } = useResourceList<TelegramChatDto>("telegram-chats", 50);
+  const commandPermissions = useResourceList<TelegramCommandPermissionDto>("telegram-command-permissions", 100);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [commandMutationError, setCommandMutationError] = useState<string | null>(null);
   const [commandChatId, setCommandChatId] = useState("");
@@ -770,12 +747,8 @@ function ChatConsole() {
 }
 
 function ConversationsPage() {
-  const { t, formatMessageRole } = useI18n();
-  const messagesLoader = useCallback(async () => {
-    const response = await apiClient.api.messages.$get({ query: { limit: "20", offset: "0" } });
-    return readJson<ListPayload<MessageDto>>(response);
-  }, []);
-  const { data, total, loading, error, reload } = useListLoader(messagesLoader, [messagesLoader]);
+  const { t, formatMessageRole, formatDate } = useI18n();
+  const { data, total, loading, error, reload } = useResourceList<MessageDto>("messages", 20);
 
   return (
     <ResourcePage
@@ -814,12 +787,8 @@ function ConversationsPage() {
 }
 
 function MemoryPage() {
-  const { t } = useI18n();
-  const loader = useCallback(async () => {
-    const response = await apiClient.api.memories.$get({ query: { limit: "30", offset: "0" } });
-    return readJson<ListPayload<MemoryDto>>(response);
-  }, []);
-  const { data, total, loading, error, reload } = useListLoader(loader, [loader]);
+  const { t, formatDate } = useI18n();
+  const { data, total, loading, error, reload } = useResourceList<MemoryDto>("memories", 30);
 
   return (
     <ResourcePage
@@ -853,17 +822,9 @@ function MemoryPage() {
 }
 
 function SecurityPage({ user }: { user: AdminUserDto }) {
-  const { t, formatRole, formatStatus } = useI18n();
-  const adminsLoader = useCallback(async () => {
-    const response = await apiClient.api["admin-users"].$get({ query: { limit: "50", offset: "0" } });
-    return readJson<ListPayload<AdminUserDto>>(response);
-  }, []);
-  const sessionsLoader = useCallback(async () => {
-    const response = await apiClient.api["admin-sessions"].$get({ query: { limit: "20", offset: "0" } });
-    return readJson<ListPayload<AdminSessionDto>>(response);
-  }, []);
-  const admins = useListLoader(adminsLoader, [adminsLoader]);
-  const sessions = useListLoader(sessionsLoader, [sessionsLoader]);
+  const { t, formatRole, formatStatus, formatDate } = useI18n();
+  const admins = useResourceList<AdminUserDto>("admin-users", 50);
+  const sessions = useResourceList<AdminSessionDto>("admin-sessions", 20);
   const [form, setForm] = useState({ username: "", displayName: "", password: "", role: "operator" as AdminUserDto["role"] });
   const [mutationError, setMutationError] = useState<string | null>(null);
 
@@ -974,18 +935,21 @@ function SecurityPage({ user }: { user: AdminUserDto }) {
             <form className="grid gap-3" onSubmit={createAdmin}>
               <Label>
                 {t("security.username")}
-                <Input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
+                <Input value={form.username} onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))} />
               </Label>
               <Label>
                 {t("security.displayName")}
-                <Input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} />
+                <Input
+                  value={form.displayName}
+                  onChange={(event) => setForm((current) => ({ ...current, displayName: event.target.value }))}
+                />
               </Label>
               <Label>
                 {t("security.password")}
                 <Input
                   type="password"
                   value={form.password}
-                  onChange={(event) => setForm({ ...form, password: event.target.value })}
+                  onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
                 />
               </Label>
               <Label>
@@ -993,7 +957,7 @@ function SecurityPage({ user }: { user: AdminUserDto }) {
                 <select
                   className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
                   value={form.role}
-                  onChange={(event) => setForm({ ...form, role: event.target.value as AdminUserDto["role"] })}
+                  onChange={(event) => setForm((current) => ({ ...current, role: event.target.value as AdminUserDto["role"] }))}
                 >
                   <option value="operator">{formatRole("operator")}</option>
                   <option value="auditor">{formatRole("auditor")}</option>
@@ -1044,12 +1008,8 @@ function SecurityPage({ user }: { user: AdminUserDto }) {
 }
 
 function AuditPage() {
-  const { t } = useI18n();
-  const loader = useCallback(async () => {
-    const response = await apiClient.api["audit-logs"].$get({ query: { limit: "50", offset: "0" } });
-    return readJson<ListPayload<AuditLogDto>>(response);
-  }, []);
-  const { data, total, loading, error, reload } = useListLoader(loader, [loader]);
+  const { t, formatDate } = useI18n();
+  const { data, total, loading, error, reload } = useResourceList<AuditLogDto>("audit-logs", 50);
 
   return (
     <ResourcePage title={t("audit.title")} description={t("audit.description")} error={error} loading={loading} onRefresh={reload}>
@@ -1156,16 +1116,57 @@ function settingsToForm(settings: RuntimeSettings): RuntimeSettingsForm {
   };
 }
 
+type RuntimeSettingsDraft = {
+  form: RuntimeSettingsForm | null;
+  secretValues: Record<RuntimeSecretKey, string>;
+  secretClears: Record<RuntimeSecretKey, boolean>;
+};
+
+type RuntimeSettingsDraftAction =
+  | { type: "reset"; settings: RuntimeSettings }
+  | { type: "updateForm"; patch: Partial<RuntimeSettingsForm> }
+  | { type: "setSecretValue"; key: RuntimeSecretKey; value: string }
+  | { type: "setSecretClear"; key: RuntimeSecretKey; value: boolean };
+
+const initialRuntimeSettingsDraft: RuntimeSettingsDraft = {
+  form: null,
+  secretValues: emptyRuntimeSecrets,
+  secretClears: emptyRuntimeSecretClears
+};
+
+function runtimeSettingsDraftReducer(state: RuntimeSettingsDraft, action: RuntimeSettingsDraftAction): RuntimeSettingsDraft {
+  if (action.type === "reset") {
+    return {
+      form: settingsToForm(action.settings),
+      secretValues: emptyRuntimeSecrets,
+      secretClears: emptyRuntimeSecretClears
+    };
+  }
+
+  if (action.type === "updateForm") {
+    return state.form ? { ...state, form: { ...state.form, ...action.patch } } : state;
+  }
+
+  if (action.type === "setSecretValue") {
+    return { ...state, secretValues: { ...state.secretValues, [action.key]: action.value } };
+  }
+
+  return { ...state, secretClears: { ...state.secretClears, [action.key]: action.value } };
+}
+
 function SystemPage() {
   const { t, formatStatus, formatSearchProvider, formatDepth } = useI18n();
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
-  const [form, setForm] = useState<RuntimeSettingsForm | null>(null);
-  const [secretValues, setSecretValues] = useState<Record<RuntimeSecretKey, string>>(emptyRuntimeSecrets);
-  const [secretClears, setSecretClears] = useState<Record<RuntimeSecretKey, boolean>>(emptyRuntimeSecretClears);
+  const [draft, dispatchDraft] = useReducer(runtimeSettingsDraftReducer, initialRuntimeSettingsDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const { form, secretValues, secretClears } = draft;
+
+  const updateForm = useCallback((patch: Partial<RuntimeSettingsForm>) => {
+    dispatchDraft({ type: "updateForm", patch });
+  }, []);
 
   const load = useCallback(async () => {
     setError(null);
@@ -1175,12 +1176,13 @@ function SystemPage() {
         apiClient.api.system.status.$get(),
         apiClient.api.system.settings.$get()
       ]);
-      const settingsPayload = await readJson<{ data: RuntimeSettings }>(settingsResponse);
-      setSystem(await readJson<SystemStatus>(statusResponse));
+      const [statusPayload, settingsPayload] = await Promise.all([
+        readJson<SystemStatus>(statusResponse),
+        readJson<{ data: RuntimeSettings }>(settingsResponse)
+      ]);
+      setSystem(statusPayload);
       setSettings(settingsPayload.data);
-      setForm(settingsToForm(settingsPayload.data));
-      setSecretValues(emptyRuntimeSecrets);
-      setSecretClears(emptyRuntimeSecretClears);
+      dispatchDraft({ type: "reset", settings: settingsPayload.data });
     } catch (requestError) {
       setError(errorMessage(requestError));
     }
@@ -1238,9 +1240,7 @@ function SystemPage() {
       });
       const payload = await readJson<{ data: RuntimeSettings }>(response);
       setSettings(payload.data);
-      setForm(settingsToForm(payload.data));
-      setSecretValues(emptyRuntimeSecrets);
-      setSecretClears(emptyRuntimeSecretClears);
+      dispatchDraft({ type: "reset", settings: payload.data });
       await load();
       setNotice(t("system.settingsSaved"));
     } catch (requestError) {
@@ -1299,7 +1299,7 @@ function SystemPage() {
                       )}
                       key={value}
                       type="button"
-                      onClick={() => setForm({ ...form, gatewayPreset: value as RuntimeSettings["gatewayPreset"] })}
+                      onClick={() => updateForm({ gatewayPreset: value as RuntimeSettings["gatewayPreset"] })}
                     >
                       {label}
                     </button>
@@ -1317,7 +1317,7 @@ function SystemPage() {
                     {t("system.defaultBaseUrl")}
                     <Input
                       value={form.bootBaseUrl}
-                      onChange={(event) => setForm({ ...form, bootBaseUrl: event.target.value })}
+                      onChange={(event) => updateForm({ bootBaseUrl: event.target.value })}
                       placeholder="https://new-api.example.com/v1"
                     />
                   </Label>
@@ -1325,7 +1325,7 @@ function SystemPage() {
                     {t("system.chatBaseUrl")}
                     <Input
                       value={form.bootChatBaseUrl ?? ""}
-                      onChange={(event) => setForm({ ...form, bootChatBaseUrl: event.target.value || null })}
+                      onChange={(event) => updateForm({ bootChatBaseUrl: event.target.value || null })}
                       placeholder={t("system.fallbackDefault")}
                     />
                   </Label>
@@ -1333,7 +1333,7 @@ function SystemPage() {
                     {t("system.embeddingBaseUrl")}
                     <Input
                       value={form.bootEmbeddingBaseUrl ?? ""}
-                      onChange={(event) => setForm({ ...form, bootEmbeddingBaseUrl: event.target.value || null })}
+                      onChange={(event) => updateForm({ bootEmbeddingBaseUrl: event.target.value || null })}
                       placeholder={t("system.fallbackDefault")}
                     />
                   </Label>
@@ -1341,7 +1341,7 @@ function SystemPage() {
                     {t("system.imageBaseUrl")}
                     <Input
                       value={form.bootImageBaseUrl ?? ""}
-                      onChange={(event) => setForm({ ...form, bootImageBaseUrl: event.target.value || null })}
+                      onChange={(event) => updateForm({ bootImageBaseUrl: event.target.value || null })}
                       placeholder={t("system.fallbackDefault")}
                     />
                   </Label>
@@ -1354,18 +1354,18 @@ function SystemPage() {
                   </div>
                   <Label>
                     {t("system.chatModel")}
-                    <Input value={form.bootChatModel} onChange={(event) => setForm({ ...form, bootChatModel: event.target.value })} />
+                    <Input value={form.bootChatModel} onChange={(event) => updateForm({ bootChatModel: event.target.value })} />
                   </Label>
                   <Label>
                     {t("system.embeddingModel")}
                     <Input
                       value={form.bootEmbeddingModel}
-                      onChange={(event) => setForm({ ...form, bootEmbeddingModel: event.target.value })}
+                      onChange={(event) => updateForm({ bootEmbeddingModel: event.target.value })}
                     />
                   </Label>
                   <Label>
                     {t("system.imageModel")}
-                    <Input value={form.bootImageModel} onChange={(event) => setForm({ ...form, bootImageModel: event.target.value })} />
+                    <Input value={form.bootImageModel} onChange={(event) => updateForm({ bootImageModel: event.target.value })} />
                   </Label>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -1397,7 +1397,7 @@ function SystemPage() {
                       className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
                       value={form.bootSearchProvider}
                       onChange={(event) =>
-                        setForm({ ...form, bootSearchProvider: event.target.value as RuntimeSettings["bootSearchProvider"] })
+                        updateForm({ bootSearchProvider: event.target.value as RuntimeSettings["bootSearchProvider"] })
                       }
                     >
                       <option value="disabled">{formatSearchProvider("disabled")}</option>
@@ -1410,7 +1410,7 @@ function SystemPage() {
                     {t("system.searchBaseUrl")}
                     <Input
                       value={form.bootSearchBaseUrl ?? ""}
-                      onChange={(event) => setForm({ ...form, bootSearchBaseUrl: event.target.value || null })}
+                      onChange={(event) => updateForm({ bootSearchBaseUrl: event.target.value || null })}
                       placeholder={t("system.providerDefault")}
                     />
                   </Label>
@@ -1418,7 +1418,7 @@ function SystemPage() {
                     {t("system.wikipediaApiUrl")}
                     <Input
                       value={form.bootWikipediaApiUrl}
-                      onChange={(event) => setForm({ ...form, bootWikipediaApiUrl: event.target.value })}
+                      onChange={(event) => updateForm({ bootWikipediaApiUrl: event.target.value })}
                       placeholder="https://zh.wikipedia.org/w/api.php"
                     />
                   </Label>
@@ -1426,7 +1426,7 @@ function SystemPage() {
                     {t("system.moegirlApiUrl")}
                     <Input
                       value={form.bootMoegirlApiUrl}
-                      onChange={(event) => setForm({ ...form, bootMoegirlApiUrl: event.target.value })}
+                      onChange={(event) => updateForm({ bootMoegirlApiUrl: event.target.value })}
                       placeholder="https://zh.moegirl.org.cn/api.php"
                     />
                   </Label>
@@ -1438,7 +1438,7 @@ function SystemPage() {
                         min={1}
                         type="number"
                         value={form.bootSearchMaxResults}
-                        onChange={(event) => setForm({ ...form, bootSearchMaxResults: Number(event.target.value) })}
+                        onChange={(event) => updateForm({ bootSearchMaxResults: Number(event.target.value) })}
                       />
                     </Label>
                     <Label>
@@ -1447,7 +1447,7 @@ function SystemPage() {
                         className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
                         value={form.bootSearchDepth}
                         onChange={(event) =>
-                          setForm({ ...form, bootSearchDepth: event.target.value as RuntimeSettings["bootSearchDepth"] })
+                          updateForm({ bootSearchDepth: event.target.value as RuntimeSettings["bootSearchDepth"] })
                         }
                       >
                         <option value="basic">{formatDepth("basic")}</option>
@@ -1483,14 +1483,14 @@ function SystemPage() {
                             placeholder={settings.secrets[key] ? t("common.keepSecret") : t("common.pasteSecret")}
                             type="password"
                             value={secretValues[key]}
-                            onChange={(event) => setSecretValues({ ...secretValues, [key]: event.target.value })}
+                            onChange={(event) => dispatchDraft({ type: "setSecretValue", key, value: event.target.value })}
                           />
                           <label className="inline-flex h-10 items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 text-xs font-semibold text-zinc-700">
                             <input
                               checked={secretClears[key]}
                               className="size-4 accent-cyan-600"
                               type="checkbox"
-                              onChange={(event) => setSecretClears({ ...secretClears, [key]: event.target.checked })}
+                              onChange={(event) => dispatchDraft({ type: "setSecretClear", key, value: event.target.checked })}
                             />
                             {t("common.clear")}
                           </label>
