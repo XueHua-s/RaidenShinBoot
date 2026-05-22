@@ -1,5 +1,6 @@
 import * as robot3Module from "robot3";
 import { compact, flatMap, range, uniq, uniqBy } from "lodash-es";
+import pLimit from "p-limit";
 import { z } from "zod";
 import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import type { BootSearchChannel, WebSearchRequest, WebSearchResponse, WebSearchResult } from "./schemas.js";
@@ -9,6 +10,7 @@ const robot3 =
     ? (robot3Module as typeof robot3Module & { default: typeof robot3Module }).default
     : robot3Module;
 const { createMachine, interpret, invoke, reduce, state, transition } = robot3;
+const searchChannelConcurrency = 2;
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
@@ -59,6 +61,10 @@ type SearchPlan = {
   maxResults: number;
   channels: BootSearchChannel[];
 };
+
+type SearchChannelAttempt =
+  | { status: "completed"; results: WebSearchResult[] }
+  | { status: "failed"; failure: string; error: unknown };
 
 type SearchMachineContext = {
   request: WebSearchRequest;
@@ -278,17 +284,35 @@ function planSearch(request: WebSearchRequest, config: BootSearchConfig, options
 }
 
 async function executeSearchPlan(plan: SearchPlan, context: SearchMachineContext): Promise<WebSearchResponse> {
+  const limitChannelSearch = pLimit(searchChannelConcurrency);
+  const attempts = await Promise.all(
+    plan.channels.map((channel) =>
+      limitChannelSearch(async (): Promise<SearchChannelAttempt> => {
+        try {
+          return {
+            status: "completed",
+            results: await executeSearchChannel(channel, plan, context)
+          };
+        } catch (error) {
+          return {
+            status: "failed",
+            failure: `${channel}: ${formatBootSearchError(error)}`,
+            error
+          };
+        }
+      })
+    )
+  );
   const resultSets: WebSearchResult[][] = [];
   const failures: string[] = [];
   const errors: unknown[] = [];
 
-  for (const channel of plan.channels) {
-    try {
-      const channelResults = await executeSearchChannel(channel, plan, context);
-      resultSets.push(channelResults);
-    } catch (error) {
-      failures.push(`${channel}: ${formatBootSearchError(error)}`);
-      errors.push(error);
+  for (const attempt of attempts) {
+    if (attempt.status === "completed") {
+      resultSets.push(attempt.results);
+    } else {
+      failures.push(attempt.failure);
+      errors.push(attempt.error);
     }
   }
 

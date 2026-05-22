@@ -123,6 +123,12 @@ export const updateTelegramChatRequestSchema = z.object({
   policy: telegramChatPolicySchema.optional()
 });
 
+export const telegramCommandNameSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.replace(/^\//, "").toLowerCase())
+  .pipe(z.string().regex(/^[a-z0-9_]{1,32}$/, "Command must be 1-32 lowercase letters, numbers, or underscores."));
+
 export const telegramCommandPermissionSchema = z.object({
   id: z.string(),
   chatId: z.string().nullable(),
@@ -134,7 +140,9 @@ export const telegramCommandPermissionSchema = z.object({
 
 export const upsertTelegramCommandPermissionRequestSchema = z.object({
   chatId: z.string().nullable().optional(),
-  command: z.string().trim().min(1).max(80),
+  command: telegramCommandNameSchema.refine((command) => command !== "model", {
+    message: "/model is hidden and cannot be managed by command permission rules."
+  }),
   enabled: z.boolean()
 });
 

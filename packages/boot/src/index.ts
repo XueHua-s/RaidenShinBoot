@@ -582,19 +582,21 @@ async function saveCachedReply(input: {
     userContent: input.input.content,
     assistantContent: input.hit.reply
   });
-  refreshConversationCacheInBackground({
-    identity: input.input,
-    userId: input.userId,
-    bootConfig: input.bootConfig,
-    searchConfig: input.searchConfig,
-    semanticCacheConfig: input.semanticCacheConfig,
-    cacheScope: input.cacheScope,
-    content: input.input.content,
-    reply: input.hit.reply,
-    embedding: input.embedding,
-    metadata: cacheHitMetadata(input.hit),
-    warning: "Semantic cache refresh after hit failed."
-  });
+  if (input.hit.status === "l2_hit" || input.embedding) {
+    refreshConversationCacheInBackground({
+      identity: input.input,
+      userId: input.userId,
+      bootConfig: input.bootConfig,
+      searchConfig: input.searchConfig,
+      semanticCacheConfig: input.semanticCacheConfig,
+      cacheScope: input.cacheScope,
+      content: input.input.content,
+      reply: input.hit.reply,
+      embedding: input.embedding,
+      metadata: cacheHitMetadata(input.hit),
+      warning: "Semantic cache refresh after hit failed."
+    });
+  }
 
   return {
     reply: input.hit.reply,

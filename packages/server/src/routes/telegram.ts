@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import {
   countTelegramChats,
+  deleteTelegramCommandPermission,
   listTelegramChats,
   listTelegramCommandPermissions,
   updateTelegramChat,
@@ -86,6 +87,23 @@ export const telegramRoute = new Hono<{ Variables: AuthVariables }>()
       targetType: "telegram_command_permission",
       targetId: permission.id,
       after: snapshot(permission)
+    });
+
+    return c.json({ data: permission });
+  })
+  .delete("/command-permissions/:id", async (c) => {
+    requirePermission(c, "telegram:moderate");
+    const id = c.req.param("id");
+    const permission = await deleteTelegramCommandPermission(id);
+    if (!permission) {
+      throw new HTTPException(404, { message: "Telegram command permission not found" });
+    }
+
+    await writeAuditFromContext(c, {
+      action: "telegram_command_permission.delete",
+      targetType: "telegram_command_permission",
+      targetId: permission.id,
+      before: snapshot(permission)
     });
 
     return c.json({ data: permission });

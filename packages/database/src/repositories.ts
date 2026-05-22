@@ -716,12 +716,20 @@ export async function upsertTelegramCommandPermission(input: NewTelegramCommandP
   return row;
 }
 
+export async function deleteTelegramCommandPermission(id: string) {
+  const db = getDatabase();
+  const [row] = await db.delete(telegramCommandPermissions).where(eq(telegramCommandPermissions.id, id)).returning();
+
+  return row ? toIsoDate(row) : null;
+}
+
 export async function resolveTelegramChatAccess(input: {
   chatId: string;
   type: NewTelegramChat["type"];
   title?: string | null | undefined;
   username?: string | null | undefined;
   command?: string | null | undefined;
+  ignoreCommandPermission?: boolean | undefined;
 }) {
   const chat = await upsertTelegramChat({
     chatId: input.chatId,
@@ -732,13 +740,15 @@ export async function resolveTelegramChatAccess(input: {
   });
 
   const db = getDatabase();
-  const permissions = input.command
+  const command = input.command ?? null;
+  const shouldCheckCommandPermission = Boolean(command && !input.ignoreCommandPermission);
+  const permissions = shouldCheckCommandPermission
     ? await db
         .select()
         .from(telegramCommandPermissions)
         .where(
           and(
-            eq(telegramCommandPermissions.command, input.command),
+            eq(telegramCommandPermissions.command, command as string),
             or(eq(telegramCommandPermissions.chatId, input.chatId), isNull(telegramCommandPermissions.chatId))
           )
         )
@@ -747,7 +757,7 @@ export async function resolveTelegramChatAccess(input: {
   const globalPermission = permissions.find((permission) => permission.chatId === null);
   const permission = scopedPermission ?? globalPermission;
 
-  const commandEnabled = permission?.enabled ?? true;
+  const commandEnabled = input.ignoreCommandPermission ? true : (permission?.enabled ?? true);
   const statusAllows = chat.status === "approved";
   const policyAllows =
     chat.policy === "allow_all_commands" ||

@@ -21,6 +21,7 @@ import {
   listMemories,
   resolveTelegramChatAccess,
   updateTelegramChat,
+  upsertTelegramCommandPermission,
   upsertRuntimeSetting
 } from "@raiden/database";
 import { app } from "@raiden/server/app";
@@ -533,6 +534,45 @@ async function main() {
     if (!scopedCommandOverrideAccess.allowed) {
       throw new Error("Chat-scoped Telegram command permission should override the global rule");
     }
+    const modelCommandRuleResponse = await authedRequest("/api/telegram/command-permissions", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatId: null, command: "model", enabled: false })
+    });
+    if (modelCommandRuleResponse.status !== 400) {
+      throw new Error(`Reserved /model command permission should be rejected, got ${modelCommandRuleResponse.status}`);
+    }
+    await upsertTelegramCommandPermission({ chatId: null, command: "model", enabled: false });
+    const modelBypassAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "model",
+      ignoreCommandPermission: true
+    });
+    if (!modelBypassAccess.allowed) {
+      throw new Error("Hidden /model command should bypass command permission rules for approved chats");
+    }
+    const scopedPermission = (await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true })) as {
+      data: { id: string };
+    };
+    const deleteScopedPermissionResponse = await authedRequest(`/api/telegram/command-permissions/${scopedPermission.data.id}`, {
+      method: "DELETE"
+    });
+    if (!deleteScopedPermissionResponse.ok) {
+      throw new Error(
+        `Telegram command permission delete failed with ${deleteScopedPermissionResponse.status}: ${await deleteScopedPermissionResponse.text()}`
+      );
+    }
+    const resetScopedCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (resetScopedCommandAccess.allowed || resetScopedCommandAccess.reason !== "command_disabled") {
+      throw new Error("Deleting chat-scoped Telegram command permission should restore global inheritance");
+    }
 
     const toolsResponse = await authedRequest("/api/search/tools");
     if (!toolsResponse.ok) {
@@ -804,6 +844,7 @@ async function main() {
         }
         await waitForConversationExactCacheHit(cacheInput);
         const chatPromptCountAfterFirstCacheChat = relayState.chatPrompts.length;
+        const cacheQueryEmbeddingCountAfterFirst = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
 
         const secondCacheChat = await runBootConversation(cacheInput);
         if (secondCacheChat.cacheStatus !== "l1_hit") {
@@ -812,7 +853,10 @@ async function main() {
         if (relayState.chatPrompts.length !== chatPromptCountAfterFirstCacheChat) {
           throw new Error("Semantic cache hit should not call the chat model again");
         }
-        await waitForConversationExactCacheHit(cacheInput);
+        const cacheQueryEmbeddingCountAfterSecond = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
+        if (cacheQueryEmbeddingCountAfterSecond !== cacheQueryEmbeddingCountAfterFirst) {
+          throw new Error("L1 semantic cache hit should not refresh cache through a new query embedding");
+        }
 
         return { skipped: false as const, first: firstCacheChat.cacheStatus, second: secondCacheChat.cacheStatus };
       } finally {
@@ -854,6 +898,8 @@ async function main() {
           approvedGroupAllowed: approvedGroupAccess.allowed,
           globalCommandBlocked: !globallyBlockedCommandAccess.allowed,
           scopedCommandOverrideAllowed: scopedCommandOverrideAccess.allowed,
+          modelCommandBypassAllowed: modelBypassAccess.allowed,
+          scopedCommandResetBlocked: !resetScopedCommandAccess.allowed,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
         null,

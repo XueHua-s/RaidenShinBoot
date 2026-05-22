@@ -6,13 +6,13 @@ import { formatBootToolError, type BootToolPermissionContext } from "@raiden/sha
 import { enforceTelegramAccess } from "./access.js";
 import { rememberTelegramUser, replyAsMakoto } from "./conversation.js";
 
-const botCommands = [
+const publicBotCommands = [
   { command: "start", description: "显示欢迎信息" },
   { command: "help", description: "查看可用指令" },
-  { command: "model", description: "查看或切换对话模型" },
   { command: "draw", description: "直接生成图片" }
 ];
-const publicCommandNames = new Set(botCommands.map((command) => command.command));
+const hiddenCommandNames = new Set(["model"]);
+const handledCommandNames = new Set([...publicBotCommands.map((command) => command.command), ...hiddenCommandNames]);
 const telegramMessageBudget = 3500;
 
 function updateConstraint(ctx: Context) {
@@ -100,7 +100,7 @@ function formatModelListChunks(input: Awaited<ReturnType<typeof listEffectiveCha
 
 function unknownSlashCommand(text: string) {
   const command = text.match(/^\/([^\s@]+)(?:@\S+)?(?:\s|$)/)?.[1]?.toLowerCase();
-  return command && !publicCommandNames.has(command) ? command : null;
+  return command && !handledCommandNames.has(command) ? command : null;
 }
 
 export function createRaidenBot(token: string) {
@@ -121,9 +121,6 @@ export function createRaidenBot(token: string) {
       [
         "可以直接发消息与我交谈。",
         "我会按语义自主决定是否联网搜索或生成图片。",
-        "/model 查看当前对话模型。",
-        "/model list 查看可切换模型。",
-        "/model <model_id> 切换对话模型。",
         "/draw 描述 直接生成图片。"
       ].join("\n")
     );
@@ -233,5 +230,5 @@ export function createRaidenBot(token: string) {
 }
 
 export async function setRaidenBotCommands(bot: Bot) {
-  await bot.api.setMyCommands(botCommands);
+  await bot.api.setMyCommands(publicBotCommands);
 }

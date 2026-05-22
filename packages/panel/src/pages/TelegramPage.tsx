@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { Save } from "lucide-react";
+import { Save, Trash2 } from "lucide-react";
 import type { AdminUserDto, TelegramChatDto, TelegramCommandPermissionDto } from "@raiden/shared";
 import { EmptyRow, ResourcePage, statusTone } from "../components/page.js";
 import { Badge } from "../components/ui/badge.js";
@@ -14,6 +14,15 @@ import { errorMessage } from "../lib/utils.js";
 
 function canModerateTelegram(user: AdminUserDto) {
   return user.role === "super_admin" || user.role === "operator";
+}
+
+function normalizeCommandName(value: string) {
+  return value.trim().replace(/^\//, "").toLowerCase();
+}
+
+function canManageCommand(value: string) {
+  const command = normalizeCommandName(value);
+  return /^[a-z0-9_]{1,32}$/.test(command) && command !== "model";
 }
 
 export function TelegramPage({ user }: { user: AdminUserDto }) {
@@ -50,7 +59,9 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
     if (!canModerate) {
       return;
     }
-    if (!commandName.trim()) {
+    const command = normalizeCommandName(commandName);
+    if (!canManageCommand(commandName)) {
+      setCommandMutationError(t("telegram.commandInvalid"));
       return;
     }
 
@@ -59,7 +70,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
       const response = await apiClient.api.telegram["command-permissions"].$put({
         json: {
           chatId: commandChatId || null,
-          command: commandName.trim().replace(/^\//, "").toLowerCase(),
+          command,
           enabled: commandEnabled
         }
       });
@@ -69,6 +80,25 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
       setCommandMutationError(errorMessage(requestError));
     }
   }
+
+  async function deleteCommandPermission(permission: TelegramCommandPermissionDto) {
+    if (!canModerate) {
+      return;
+    }
+
+    setCommandMutationError(null);
+    try {
+      const response = await apiClient.api.telegram["command-permissions"][":id"].$delete({
+        param: { id: permission.id }
+      });
+      await readJson<{ data: TelegramCommandPermissionDto }>(response);
+      await commandPermissions.reload();
+    } catch (requestError) {
+      setCommandMutationError(errorMessage(requestError));
+    }
+  }
+
+  const commandSubmittable = canModerate && canManageCommand(commandName);
 
   return (
     <ResourcePage
@@ -201,7 +231,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
               </span>
             </label>
             <div className="flex items-end">
-              <Button className="w-full" disabled={!canModerate || !commandName.trim()} type="submit">
+              <Button className="w-full" disabled={!commandSubmittable} type="submit">
                 <Save className="size-4" />
                 {t("telegram.saveRule")}
               </Button>
@@ -215,6 +245,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                   <Th>{t("telegram.command")}</Th>
                   <Th>{t("telegram.permissionState")}</Th>
                   <Th>{t("common.updated")}</Th>
+                  <Th className="text-right">{t("common.actions")}</Th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
@@ -236,9 +267,24 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                       </Badge>
                     </Td>
                     <Td>{formatDate(permission.updatedAt)}</Td>
+                    <Td>
+                      <div className="flex justify-end">
+                        <Button
+                          aria-label={t("common.delete")}
+                          disabled={!canModerate}
+                          onClick={() => deleteCommandPermission(permission)}
+                          size="icon"
+                          title={t("common.delete")}
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    </Td>
                   </tr>
                 ))}
-                {commandPermissions.data.length === 0 && <EmptyRow colSpan={4}>{t("telegram.commandPermissionEmpty")}</EmptyRow>}
+                {commandPermissions.data.length === 0 && <EmptyRow colSpan={5}>{t("telegram.commandPermissionEmpty")}</EmptyRow>}
               </tbody>
             </Table>
           </div>

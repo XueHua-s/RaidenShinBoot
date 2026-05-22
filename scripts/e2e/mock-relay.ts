@@ -4,6 +4,7 @@ export type MockRelayState = {
   chatPrompts: string[];
   chatCompletionFailures: number;
   responsesPrompts: string[];
+  embeddingInputs: string[];
   imagePrompts: string[];
   searchQueries: string[];
   wikipediaQueries: string[];
@@ -18,6 +19,7 @@ export function createMockRelayState(): MockRelayState {
     chatPrompts: [],
     chatCompletionFailures: 0,
     responsesPrompts: [],
+    embeddingInputs: [],
     imagePrompts: [],
     searchQueries: [],
     wikipediaQueries: [],
@@ -42,7 +44,7 @@ export function createMockRelay(state: MockRelayState) {
       }
 
       if (req.method === "POST" && req.url === "/v1/embeddings") {
-        await handleEmbedding(req, res);
+        await handleEmbedding(req, res, state);
         return;
       }
 
@@ -177,8 +179,13 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, state:
   });
 }
 
-async function handleEmbedding(req: IncomingMessage, res: ServerResponse) {
+async function handleEmbedding(req: IncomingMessage, res: ServerResponse, state: MockRelayState) {
   const body = JSON.parse(await readBody(req)) as { input?: unknown; model?: string };
+  if (typeof body.input === "string") {
+    state.embeddingInputs.push(body.input);
+  } else if (Array.isArray(body.input)) {
+    state.embeddingInputs.push(...body.input.filter((item): item is string => typeof item === "string"));
+  }
   sendJson(res, 200, {
     object: "list",
     model: body.model ?? "mock-embedding",
