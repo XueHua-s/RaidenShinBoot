@@ -41,6 +41,7 @@
 
 - 运行环境以根 `package.json` 为准：Node 22+，包管理器只使用 `pnpm`。
 - 安装依赖先在根目录执行 `pnpm install`；不要混用 `npm` 或 `yarn`。
+- 实现功能或修复问题时，优先使用目标 package 的 `package.json` 已有依赖和仓库内现有工具，不要在未确认必要性前引入新依赖。
 - 新增依赖前先检查目标 `package.json`、现有 `packages/*` 封装和本地工具，优先复用已有实现。
 - Hono API 的前后端类型契约必须通过 `packages/server/src/app.ts` 导出的 `AppType` 传递给前端，不要手写重复 API 类型。
 - 数据库结构变更必须同步 `packages/database/src/schema.ts` 和 Drizzle 迁移；涉及向量记忆时确认 `halfvec(3072)`、embedding 模型维度和 HNSW 索引一致。
