@@ -14,11 +14,13 @@
     "@raiden/shared": "workspace:*",
     "@refinedev/core": "4.58.0",
     "@refinedev/react-router-v6": "4.6.2",
+    "dayjs": "^1.11.20",
     "hono": "^4.12.21",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "react-router-dom": "^6.30.3"
+    "react-router-dom": "^6.30.3",
+    "react-use": "^17.6.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",
@@ -30,4 +32,3 @@
     "vite": "^8.0.13"
   }
 }
-

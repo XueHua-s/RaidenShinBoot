@@ -17,6 +17,7 @@ import {
   type WebSearchRequest,
   type WebSearchResponse
 } from "./schemas.js";
+import { compact, orderBy, uniqBy } from "lodash-es";
 import {
   formatBootSearchError,
   searchGoogle,
@@ -262,10 +263,10 @@ export function searchBootTools(input: BootToolSearchRequest): BootToolSearchRes
       .split(",")
       .map((name) => name.trim().toLowerCase())
       .filter(Boolean);
-    const selected = requested
-      .map((name) => tools.find((tool) => tool.name.toLowerCase() === name))
-      .filter((tool): tool is (typeof tools)[number] => tool !== undefined)
-      .filter((tool, index, selectedTools) => selectedTools.findIndex((item) => item.name === tool.name) === index);
+    const selected = uniqBy(
+      compact(requested.map((name) => tools.find((tool) => tool.name.toLowerCase() === name))),
+      (tool) => tool.name
+    );
     const matches = selected
       .slice(0, maxResults)
       .map((tool) => ({ ...toBootToolDescriptor(tool), score: 100 }));
@@ -286,18 +287,20 @@ export function searchBootTools(input: BootToolSearchRequest): BootToolSearchRes
   const optionalTerms = terms.filter((term) => !term.startsWith("+") || term.length === 1);
   const scoringTerms = requiredTerms.length > 0 ? [...requiredTerms, ...optionalTerms] : terms;
 
-  const scored = tools
-    .map((tool) => {
-      const searchable = searchableToolText(tool);
-      if (requiredTerms.length > 0 && !requiredTerms.every((term) => searchable.includes(term))) {
-        return null;
-      }
-      const score = scoreToolMatch(tool, scoringTerms);
-      return score > 0 ? { ...toBootToolDescriptor(tool), score } : null;
-    })
-    .filter((tool): tool is BootToolDescriptor & { score: number } => tool !== null)
-    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-    .slice(0, maxResults);
+  const scored = orderBy(
+    compact(
+      tools.map((tool) => {
+        const searchable = searchableToolText(tool);
+        if (requiredTerms.length > 0 && !requiredTerms.every((term) => searchable.includes(term))) {
+          return null;
+        }
+        const score = scoreToolMatch(tool, scoringTerms);
+        return score > 0 ? { ...toBootToolDescriptor(tool), score } : null;
+      })
+    ),
+    [(tool) => tool.score, (tool) => tool.name],
+    ["desc", "asc"]
+  ).slice(0, maxResults);
 
   return bootToolSearchResponseSchema.parse({
     query,

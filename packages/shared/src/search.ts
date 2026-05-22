@@ -1,4 +1,5 @@
 import * as robot3Module from "robot3";
+import { compact, flatMap, range, uniq, uniqBy } from "lodash-es";
 import { z } from "zod";
 import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import type { BootSearchChannel, WebSearchRequest, WebSearchResponse, WebSearchResult } from "./schemas.js";
@@ -643,33 +644,13 @@ function knowledgeSearchQuery(query: string) {
 }
 
 function uniqueChannels(channels: BootSearchChannel[]) {
-  return Array.from(new Set(channels));
+  return uniq(channels);
 }
 
 function mergeChannelResults(resultSets: WebSearchResult[][], maxResults: number) {
-  const seen = new Set<string>();
-  const merged: WebSearchResult[] = [];
   const maxLength = Math.max(0, ...resultSets.map((results) => results.length));
-
-  for (let index = 0; index < maxLength && merged.length < maxResults; index += 1) {
-    for (const results of resultSets) {
-      const result = results[index];
-      if (!result) {
-        continue;
-      }
-      const key = result.url.toLowerCase();
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      merged.push(result);
-      if (merged.length >= maxResults) {
-        break;
-      }
-    }
-  }
-
-  return merged;
+  const interleaved = flatMap(range(maxLength), (index) => compact(resultSets.map((results) => results[index])));
+  return uniqBy(interleaved, (result) => result.url.toLowerCase()).slice(0, maxResults);
 }
 
 function joinUrl(baseUrl: string, path: string) {

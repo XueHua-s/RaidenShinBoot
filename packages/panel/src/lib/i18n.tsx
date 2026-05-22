@@ -1,4 +1,8 @@
-import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import dayjs from "dayjs";
+import "dayjs/locale/en.js";
+import "dayjs/locale/zh-cn.js";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo } from "react";
+import useLocalStorage from "react-use/esm/useLocalStorage.js";
 
 export type Locale = "zh" | "en";
 
@@ -524,12 +528,7 @@ export type I18nContextValue = {
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
-function storedLocale() {
-  if (typeof window === "undefined") {
-    return "zh";
-  }
-
-  const value = window.localStorage.getItem(localeStorageKey);
+function normalizeLocale(value: unknown): Locale {
   return value === "en" || value === "zh" ? value : "zh";
 }
 
@@ -554,24 +553,21 @@ function rawOrMapped(t: I18nContextValue["t"], prefix: string, value: string | n
 }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(storedLocale);
+  const [storedLocale, setStoredLocale] = useLocalStorage<Locale>(localeStorageKey, "zh", { raw: true });
+  const locale = normalizeLocale(storedLocale);
+  const setLocale = useCallback((nextLocale: Locale) => setStoredLocale(nextLocale), [setStoredLocale]);
 
   useEffect(() => {
-    window.localStorage.setItem(localeStorageKey, locale);
     document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
   }, [locale]);
 
   const value = useMemo<I18nContextValue>(() => {
-    const dateFormatter = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
     const t = (key: TranslationKey, variables?: Variables) => interpolate(dictionaries[locale][key], variables);
+    const dateLocale = locale === "zh" ? "zh-cn" : "en";
+    const dateFormat = locale === "zh" ? "MM月DD日 HH:mm" : "MM/DD HH:mm";
     return {
       locale,
-      setLocale: setLocaleState,
+      setLocale,
       t,
       formatStatus: (raw) => rawOrMapped(t, "status", raw),
       formatRole: (raw) => rawOrMapped(t, "role", raw),
@@ -580,9 +576,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       formatMessageRole: (raw) => rawOrMapped(t, "messageRole", raw),
       formatSearchProvider: (raw) => (raw === "disabled" ? t("provider.disabled") : raw ?? "-"),
       formatDepth: (raw) => rawOrMapped(t, "depth", raw),
-      formatDate: (raw) => (raw ? dateFormatter.format(new Date(raw)) : "-")
+      formatDate: (raw) => (raw ? dayjs(raw).locale(dateLocale).format(dateFormat) : "-")
     };
-  }, [locale]);
+  }, [locale, setLocale]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
