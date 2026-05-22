@@ -49,6 +49,17 @@ export type RuntimeSettingsChangeSet = {
   upserts?: NewRuntimeSetting[];
 };
 
+export type AuditLogInput = {
+  actorAdminId?: string | null;
+  action: string;
+  targetType: string;
+  targetId?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
 const defaultPagination = {
   limit: 20,
   offset: 0
@@ -352,16 +363,7 @@ export async function countAdminSessions() {
   return row?.count ?? 0;
 }
 
-export async function createAuditLog(input: {
-  actorAdminId?: string | null;
-  action: string;
-  targetType: string;
-  targetId?: string | null;
-  before?: Record<string, unknown> | null;
-  after?: Record<string, unknown> | null;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-}) {
+export async function createAuditLog(input: AuditLogInput) {
   const db = getDatabase();
   const [row] = await db
     .insert(auditLogs)
@@ -475,6 +477,54 @@ export async function applyRuntimeSettingsChanges(input: RuntimeSettingsChangeSe
             updatedAt: new Date()
           }
         });
+    }
+  });
+}
+
+export async function applyRuntimeSettingsChangesWithAudit(input: {
+  changes: RuntimeSettingsChangeSet;
+  audit: AuditLogInput;
+}) {
+  const db = getDatabase();
+  const deletes = Array.from(new Set(input.changes.deletes ?? []));
+  const upserts = input.changes.upserts ?? [];
+
+  await db.transaction(async (tx) => {
+    for (const key of deletes) {
+      await tx.delete(runtimeSettings).where(eq(runtimeSettings.key, key));
+    }
+
+    for (const setting of upserts) {
+      await tx
+        .insert(runtimeSettings)
+        .values(setting)
+        .onConflictDoUpdate({
+          target: runtimeSettings.key,
+          set: {
+            value: setting.value ?? null,
+            encrypted: setting.encrypted ?? false,
+            updatedByAdminId: setting.updatedByAdminId ?? null,
+            updatedAt: new Date()
+          }
+        });
+    }
+
+    const [row] = await tx
+      .insert(auditLogs)
+      .values({
+        actorAdminId: input.audit.actorAdminId ?? null,
+        action: input.audit.action,
+        targetType: input.audit.targetType,
+        targetId: input.audit.targetId ?? null,
+        before: input.audit.before ?? null,
+        after: input.audit.after ?? null,
+        ipAddress: input.audit.ipAddress ?? null,
+        userAgent: input.audit.userAgent ?? null
+      })
+      .returning();
+
+    if (!row) {
+      throw new Error("Failed to create audit log");
     }
   });
 }

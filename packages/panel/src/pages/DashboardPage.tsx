@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Bot, Brain, FileClock, MessageSquareText, RefreshCw, Server, Users } from "lucide-react";
+import { Bot, Brain, MessageSquareText, RefreshCw, Users } from "lucide-react";
 import type { AuditLogDto, MemoryDto, MessageDto, SystemStatus, TelegramChatDto, TelegramUserDto } from "@raiden/shared";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";

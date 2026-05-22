@@ -1,5 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import * as robot3Module from "robot3";
+import { fixedBootEmbeddingModel } from "@raiden/shared/boot";
 import {
   conversationCachePolicyVersion,
   isStandaloneCacheCandidate,
@@ -176,7 +177,7 @@ export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): Se
     prefix,
     namespace:
       optionalString(env.BOOT_SEMANTIC_CACHE_NAMESPACE) ??
-      stableHash([env.BOOT_CHAT_MODEL ?? "", env.BOOT_EMBEDDING_MODEL ?? "", conversationCachePolicyVersion]).slice(0, 16),
+      stableHash([env.BOOT_CHAT_MODEL ?? "", fixedBootEmbeddingModel, conversationCachePolicyVersion]).slice(0, 16),
     ttlSeconds: positiveInteger(env.BOOT_SEMANTIC_CACHE_TTL_SECONDS, 86_400, 2_592_000),
     similarityThreshold: boundedNumber(env.BOOT_SEMANTIC_CACHE_THRESHOLD, 0.92, 0.5, 0.99),
     maxCandidates: positiveInteger(env.BOOT_SEMANTIC_CACHE_MAX_CANDIDATES, 8, 50),
@@ -346,7 +347,7 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
 
   const client = await getRedisClient(context.config);
   await ensureVectorIndex(client, context.config);
-  if (unavailableIndexes.has(context.config.indexName)) {
+  if (unavailableIndexes.has(indexStateKey(context.config))) {
     return null;
   }
 
@@ -472,7 +473,8 @@ function cacheMiss(status: "disabled" | "miss", reason: string | undefined): Con
 }
 
 async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheConfig) {
-  if (readyIndexes.has(config.indexName) || unavailableIndexes.has(config.indexName)) {
+  const stateKey = indexStateKey(config);
+  if (readyIndexes.has(stateKey) || unavailableIndexes.has(stateKey)) {
     return;
   }
 
@@ -509,20 +511,24 @@ async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheC
       "DISTANCE_METRIC",
       "COSINE"
     ]);
-    readyIndexes.add(config.indexName);
+    readyIndexes.add(stateKey);
   } catch (error) {
     const message = errorMessage(error);
     if (/index already exists/i.test(message)) {
-      readyIndexes.add(config.indexName);
+      readyIndexes.add(stateKey);
       return;
     }
     if (/unknown command|module|redisearch/i.test(message)) {
-      unavailableIndexes.add(config.indexName);
+      unavailableIndexes.add(stateKey);
       return;
     }
 
     throw error;
   }
+}
+
+function indexStateKey(config: SemanticCacheConfig) {
+  return `${config.redisUrl ?? ""}:${config.prefix}:${config.indexName}`;
 }
 
 function validEntry(
@@ -630,7 +636,7 @@ function nonNegativeInteger(value: number) {
 }
 
 function escapeTagValue(value: string) {
-  return value.replace(/([\\,.<>{}\[\]"':;!@#$%^&*()\-=+~\s|])/g, "\\$1");
+  return value.replace(/([\\,.<>{}[\]"':;!@#$%^&*()\-=+~\s|])/g, "\\$1");
 }
 
 function float32VectorBuffer(values: number[]) {

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useState } from "react";
-import { Save, Search, Settings2 } from "lucide-react";
-import type { RuntimeSettings, SystemStatus } from "@raiden/shared";
+import { RefreshCw, Save, Search, Settings2 } from "lucide-react";
+import type { AdminUserDto, ChatModelListResponse, RuntimeSettings, SystemStatus } from "@raiden/shared";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card.js";
@@ -111,18 +111,36 @@ function runtimeSettingsDraftReducer(state: RuntimeSettingsDraft, action: Runtim
   return { ...state, secretClears: { ...state.secretClears, [action.key]: action.value } };
 }
 
-export function SystemPage() {
+export function SystemPage({ user }: { user: AdminUserDto }) {
   const { t, formatStatus, formatSearchProvider, formatDepth } = useI18n();
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
+  const [chatModels, setChatModels] = useState<ChatModelListResponse | null>(null);
+  const [chatModelsLoading, setChatModelsLoading] = useState(false);
+  const [chatModelsError, setChatModelsError] = useState<string | null>(null);
   const [draft, dispatchDraft] = useReducer(runtimeSettingsDraftReducer, initialRuntimeSettingsDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const { form, secretValues, secretClears } = draft;
+  const canWriteSystem = user.role === "super_admin";
 
   const updateForm = useCallback((patch: Partial<RuntimeSettingsForm>) => {
     dispatchDraft({ type: "updateForm", patch });
+  }, []);
+
+  const loadChatModels = useCallback(async () => {
+    setChatModelsLoading(true);
+    setChatModelsError(null);
+    try {
+      const response = await apiClient.api.system.models.chat.$get();
+      setChatModels(await readJson<ChatModelListResponse>(response));
+    } catch (requestError) {
+      setChatModels(null);
+      setChatModelsError(errorMessage(requestError));
+    } finally {
+      setChatModelsLoading(false);
+    }
   }, []);
 
   const load = useCallback(async () => {
@@ -147,7 +165,8 @@ export function SystemPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadChatModels();
+  }, [load, loadChatModels]);
 
   const rows = useMemo(
     () => [
@@ -164,10 +183,14 @@ export function SystemPage() {
     ],
     [formatSearchProvider, formatStatus, system, t]
   );
+  const listedChatModelIds = chatModels?.models.map((model) => model.id) ?? [];
+  const hasInvalidListedChatModel = Boolean(
+    form && listedChatModelIds.length > 0 && !listedChatModelIds.includes(form.bootChatModel)
+  );
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!form) {
+    if (!form || !canWriteSystem) {
       return;
     }
 
@@ -185,13 +208,18 @@ export function SystemPage() {
       }, {});
       const response = await apiClient.api.system.settings.$patch({
         json: {
-          ...form,
+          gatewayPreset: form.gatewayPreset,
+          bootBaseUrl: form.bootBaseUrl,
           bootChatBaseUrl: form.bootChatBaseUrl || null,
           bootEmbeddingBaseUrl: form.bootEmbeddingBaseUrl || null,
           bootImageBaseUrl: form.bootImageBaseUrl || null,
           bootSearchBaseUrl: form.bootSearchBaseUrl || null,
           bootWikipediaApiUrl: form.bootWikipediaApiUrl,
           bootMoegirlApiUrl: form.bootMoegirlApiUrl,
+          bootChatModel: form.bootChatModel,
+          bootSearchProvider: form.bootSearchProvider,
+          bootSearchMaxResults: form.bootSearchMaxResults,
+          bootSearchDepth: form.bootSearchDepth,
           ...secretPatch
         }
       });
@@ -199,6 +227,7 @@ export function SystemPage() {
       setSettings(payload.data);
       dispatchDraft({ type: "reset", settings: payload.data });
       await load();
+      await loadChatModels();
       setNotice(t("system.settingsSaved"));
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -237,7 +266,16 @@ export function SystemPage() {
           <CardContent>
             <form className="grid gap-5" onSubmit={saveSettings}>
               <GatewayPresetSection form={form} t={t} updateForm={updateForm} />
-              <EndpointAndModelSections form={form} settings={settings} t={t} updateForm={updateForm} />
+              <EndpointAndModelSections
+                chatModels={chatModels}
+                chatModelsError={chatModelsError}
+                chatModelsLoading={chatModelsLoading}
+                form={form}
+                settings={settings}
+                t={t}
+                updateForm={updateForm}
+                onRefreshChatModels={loadChatModels}
+              />
               <SearchAndSecretSections
                 form={form}
                 formatDepth={formatDepth}
@@ -252,10 +290,13 @@ export function SystemPage() {
               />
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
                 <p className="text-xs leading-5 text-zinc-500">{t("system.auditHint")}</p>
-                <Button disabled={saving || !form.bootBaseUrl.trim()} type="submit">
-                  <Save className="size-4" />
-                  {saving ? t("common.saving") : t("common.save")}
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {!canWriteSystem && <Badge tone="warning">{t("common.readOnly")}</Badge>}
+                  <Button disabled={!canWriteSystem || saving || !form.bootBaseUrl.trim() || hasInvalidListedChatModel} type="submit">
+                    <Save className="size-4" />
+                    {saving ? t("common.saving") : t("common.save")}
+                  </Button>
+                </div>
               </div>
             </form>
           </CardContent>
@@ -306,16 +347,27 @@ function GatewayPresetSection({
 }
 
 function EndpointAndModelSections({
+  chatModels,
+  chatModelsError,
+  chatModelsLoading,
   form,
   settings,
   t,
-  updateForm
+  updateForm,
+  onRefreshChatModels
 }: {
+  chatModels: ChatModelListResponse | null;
+  chatModelsError: string | null;
+  chatModelsLoading: boolean;
   form: RuntimeSettingsForm;
   settings: RuntimeSettings;
   t: I18nContextValue["t"];
   updateForm: (patch: Partial<RuntimeSettingsForm>) => void;
+  onRefreshChatModels: () => void | Promise<void>;
 }) {
+  const chatModelIds = chatModels?.models.map((model) => model.id) ?? [];
+  const invalidCurrentModel = chatModelIds.length > 0 && !chatModelIds.includes(form.bootChatModel);
+
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <div className="grid gap-3 rounded-lg border border-zinc-200 p-4">
@@ -362,17 +414,56 @@ function EndpointAndModelSections({
           <h3 className="text-sm font-semibold text-zinc-950">{t("system.modelMapping")}</h3>
           <p className="mt-1 text-xs leading-5 text-zinc-500">{t("system.modelHelp")}</p>
         </div>
-        <Label>
-          {t("system.chatModel")}
-          <Input value={form.bootChatModel} onChange={(event) => updateForm({ bootChatModel: event.target.value })} />
-        </Label>
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-zinc-700">{t("system.chatModel")}</span>
+            <Button disabled={chatModelsLoading} size="sm" type="button" variant="outline" onClick={onRefreshChatModels}>
+              <RefreshCw className={cn("size-3.5", chatModelsLoading && "animate-spin")} />
+              {t("common.refresh")}
+            </Button>
+          </div>
+          {chatModelIds.length > 0 ? (
+            <select
+              className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+              value={form.bootChatModel}
+              onChange={(event) => updateForm({ bootChatModel: event.target.value })}
+            >
+              {invalidCurrentModel && (
+                <option disabled value={form.bootChatModel}>
+                  {t("system.currentModelUnavailable", { model: form.bootChatModel })}
+                </option>
+              )}
+              {chatModelIds.map((modelId) => (
+                <option key={modelId} value={modelId}>
+                  {modelId}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <Input value={form.bootChatModel} onChange={(event) => updateForm({ bootChatModel: event.target.value })} />
+          )}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
+              {chatModelsError
+                ? t("system.modelListUnavailable")
+                : chatModelsLoading
+                  ? t("common.checking")
+                  : t("system.modelListLoaded", { count: chatModels?.models.length ?? 0 })}
+            </Badge>
+            {invalidCurrentModel && <Badge tone="danger">{t("system.currentModelMustChange")}</Badge>}
+            {chatModelsError && <span className="min-w-0 truncate">{chatModelsError}</span>}
+            {chatModels?.source && <span className="min-w-0 truncate" title={chatModels.source}>{chatModels.source}</span>}
+          </div>
+        </div>
         <Label>
           {t("system.embeddingModel")}
-          <Input value={form.bootEmbeddingModel} onChange={(event) => updateForm({ bootEmbeddingModel: event.target.value })} />
+          <Input readOnly value={form.bootEmbeddingModel} />
+          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <Label>
           {t("system.imageModel")}
-          <Input value={form.bootImageModel} onChange={(event) => updateForm({ bootImageModel: event.target.value })} />
+          <Input readOnly value={form.bootImageModel} />
+          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">

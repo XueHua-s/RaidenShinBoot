@@ -1,18 +1,18 @@
 # RaidenShinBoot
 
-RaidenShinBoot is a modern TypeScript monorepo for a Telegram bot whose core personality is Raiden Makoto from Genshin Impact. It uses grammY for the bot, Hono for the typed API, PostgreSQL + Drizzle ORM + pgvector halfvec memory search, and a React 19 + Refine v4 + Tailwind CSS v4 admin panel.
+RaidenShinBoot 是一个面向 Telegram 机器人的 TypeScript monorepo，核心人格为《原神》中的雷电真。项目使用 grammY 实现 bot，Hono 提供 typed API，PostgreSQL + Drizzle ORM + pgvector `halfvec(3072)` 提供长期记忆检索，并包含 React 19 + Refine v4 + Tailwind CSS v4 管理后台。
 
-## Stack
+## 技术栈
 
-- `pnpm` workspace with `shared`, `database`, `bot`, `server`, and `panel`
+- `pnpm` workspace，包含 `shared`、`database`、`boot`、`bot`、`server`、`panel`
 - grammY Telegram bot
-- Hono chain routes with `AppType` exported to the panel through `hono/client`
-- PostgreSQL, Drizzle ORM, `pgvector` `halfvec(3072)`, and HNSW vector index
-- React 19, Refine v4, Tailwind CSS v4, Vite
-- Vercel AI SDK v6 with OpenAI-compatible relays for chat, embeddings, and image generation
-- `tsdown` for package builds and Vite for the panel
+- Hono 链式路由，`AppType` 通过 `hono/client` 传给管理后台
+- PostgreSQL、Drizzle ORM、`pgvector` `halfvec(3072)`、HNSW 向量索引
+- React 19、Refine v4、Tailwind CSS v4、Vite
+- Vercel AI SDK v6，兼容 OpenAI 风格 relay 的 chat、embedding、image 能力
+- `tsdown` 负责 package 构建，Vite 负责 panel 构建
 
-## Quick Start
+## 快速启动
 
 ```bash
 pnpm install
@@ -28,78 +28,136 @@ pnpm dev:panel
 pnpm dev:bot
 ```
 
-Fill `BOT_TOKEN` and AI relay keys in `.env` before starting the bot. Use `BOOT_CHAT_API_KEY` and `BOOT_EMBEDDING_API_KEY` when chat and embedding are served by different relay hosts.
-Set `REDIS_URL` to enable BullMQ jobs, Telegram webhook ingestion, and L1/L2 semantic response cache. Without Redis, local long polling still works and durable memory falls back to the original inline path. Webhook enqueue fails fast with a stable 503 after `BOOT_QUEUE_ENQUEUE_TIMEOUT_MS` when Redis is unavailable.
-For webhook mode, set `BOOT_TELEGRAM_WEBHOOK_SECRET`, configure Telegram to send updates to `POST /api/telegram/webhook` with that `secret_token`, set `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`, and run the worker with `pnpm --filter @raiden/bot dev:worker`.
-Optionally set `BOT_RUNTIME_MODE=polling` or `BOT_RUNTIME_MODE=worker` as a startup guard so the wrong process cannot be launched in a deployment slot.
-When testing the admin panel locally, keep the browser host and `VITE_API_BASE_URL` host consistent, for example `http://localhost:5173` with `http://localhost:8787` or `http://127.0.0.1:5173` with `http://127.0.0.1:8787`. Admin session cookies are host-bound, so mixing `localhost` and `127.0.0.1` can make authenticated panel requests look unauthorized.
-Create the first admin with `pnpm admin:bootstrap`; the command requires `ADMIN_USERNAME` and an `ADMIN_PASSWORD` of at least 12 characters and never creates a default production account.
-Set `BOOT_SETTINGS_ENCRYPTION_KEY` before saving relay keys in the admin System page; model names and base URLs can be managed without it, but secrets are rejected unless encrypted storage is ready.
-If the chat relay does not expose a 3072-dimensional embedding model, set `BOOT_EMBEDDING_BASE_URL` and `BOOT_EMBEDDING_MODEL` to a compatible embedding provider before using long-term memory.
-Set `BOOT_IMAGE_BASE_URL`, `BOOT_IMAGE_API_KEY`, and `BOOT_IMAGE_MODEL` to enable `/api/images` and the Telegram `/draw` command.
-Set `BOOT_SEARCH_PROVIDER` plus `BOOT_SEARCH_API_KEY` to enable the Boot `web_search` tool, `POST /api/search`, Telegram `/search`, and automatic search injection for explicit search requests in chat.
-On macOS without Docker Desktop, `brew install colima docker docker-compose` plus `colima start` is enough for the local pgvector service.
+启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。如果 chat 与 embedding 使用不同服务，分别配置 `BOOT_CHAT_API_KEY` 和 `BOOT_EMBEDDING_API_KEY`。
 
-To run the containerized app stack after filling `.env`:
+配置 `REDIS_URL` 后会启用 BullMQ 队列、Telegram webhook 入队、L1/L2 语义响应缓存。没有 Redis 时，本地 polling 仍可工作，长期记忆会回退到原来的 inline 创建路径；webhook 入队会在 `BOOT_QUEUE_ENQUEUE_TIMEOUT_MS` 后稳定返回 503。
+
+webhook 模式需要设置 `BOOT_TELEGRAM_WEBHOOK_SECRET`，并在 Telegram 侧把 update 发到 `POST /api/telegram/webhook`，同时使用同一个值作为 `secret_token`。如需异步记忆增强，设置 `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`，并运行 `pnpm --filter @raiden/bot dev:worker`。
+
+可以设置 `BOT_RUNTIME_MODE=polling` 或 `BOT_RUNTIME_MODE=worker` 作为启动保护，避免把错误进程启动到错误部署槽位。
+
+本地测试管理后台时，浏览器 host 和 `VITE_API_BASE_URL` host 要保持一致。例如 `http://localhost:5173` 搭配 `http://localhost:8787`，或 `http://127.0.0.1:5173` 搭配 `http://127.0.0.1:8787`。管理后台 session cookie 绑定 host，混用 `localhost` 和 `127.0.0.1` 会导致已登录请求看起来像未授权。
+
+远程部署时，panel 镜像构建参数 `VITE_API_BASE_URL` 必须指向浏览器可访问的 API 地址，例如 `https://api.example.com`；API 服务的 `CORS_ALLOWED_ORIGINS` 必须包含 panel 的访问源，例如 `https://panel.example.com`。多个源用英文逗号分隔。
+
+首次创建管理员使用 `pnpm admin:bootstrap`。该命令需要 `ADMIN_USERNAME` 和至少 12 位的 `ADMIN_PASSWORD`，不会创建默认生产账号。
+
+如果要在管理后台 System 页保存 relay key，必须先设置 `BOOT_SETTINGS_ENCRYPTION_KEY`。模型名和 base URL 可以不依赖该密钥管理，但 secret 类型字段会在加密存储未就绪时拒绝写入。
+
+生产环境的 `BOOT_SETTINGS_ENCRYPTION_KEY` 必须长期稳定并备份。变更或丢失该值后，数据库中已经加密保存的 runtime secret 将无法解密，需要重新在 System 页保存对应 key。
+
+如果 chat relay 不提供 3072 维 embedding，需要设置 `BOOT_EMBEDDING_BASE_URL` 和 `BOOT_EMBEDDING_API_KEY` 指向兼容 provider。嵌入模型名固定为 `text-embedding-3-large`，必须返回 3072 维，否则长期记忆写入和检索会失败。
+
+设置 `BOOT_IMAGE_BASE_URL`、`BOOT_IMAGE_API_KEY` 后，可以启用 `/api/images`、Telegram `/draw` 和自然语言自主生图。生图模型固定为 `chatgpt-image-latest`，不对用户开放自定义。
+
+设置 `BOOT_SEARCH_PROVIDER` 和 `BOOT_SEARCH_API_KEY` 后，可以启用 Boot `web_search` tool、`POST /api/search`，以及聊天中由机器人自主判断的联网搜索。`BOOT_SEARCH_PROVIDER=disabled` 会禁用所有外部搜索渠道，包括 Wikipedia/Moegirl 直连。Telegram 不再开放 `/search` 命令。
+
+macOS 没有 Docker Desktop 时，可以使用 `brew install colima docker docker-compose` 加 `colima start` 启动本地 pgvector 服务。
+
+如果其它本地 stack 已经占用了默认容器名或宿主机端口，可以在 `.env` 中覆盖 `POSTGRES_CONTAINER_NAME`、`POSTGRES_PORT`、`REDIS_CONTAINER_NAME`、`REDIS_PORT`。compose 内部服务 URL 保持不变；容器外运行本地脚本时，宿主机侧 `DATABASE_URL` 和 `REDIS_URL` 应与覆盖后的端口一致。
+
+端口和浏览器地址对应关系：
+
+| 配置项 | 宿主机默认端口 | 容器内地址 | 浏览器/外部访问 |
+| --- | --- | --- | --- |
+| `SERVER_PORT` | `8787` | `api:8787` | `VITE_API_BASE_URL` 指向的 API 地址 |
+| `PANEL_PORT` | `5173` | `panel:80` | `http://localhost:5173` 或你的 panel 域名 |
+| `POSTGRES_PORT` | `5432` | `postgres:5432` | 仅本机脚本需要用宿主机端口 |
+| `REDIS_PORT` | `6379` | `redis:6379` | 仅本机脚本需要用宿主机端口 |
+
+修改 `SERVER_PORT` 或使用反向代理域名时，同步修改 `VITE_API_BASE_URL`；跨域访问时同步设置 `CORS_ALLOWED_ORIGINS`。
+
+## Docker 部署
+
+填好 `.env` 后启动 API、panel、Postgres、Redis 和迁移任务：
 
 ```bash
 docker compose --profile app up --build
 ```
 
-The `bot` container is isolated behind a profile so local stacks can run without a Telegram token:
+首次 Docker 部署完成迁移后，需要创建第一个管理员：
+
+```bash
+docker compose --profile app run --rm api pnpm admin:bootstrap
+```
+
+运行前在 `.env` 中设置 `ADMIN_USERNAME` 和至少 12 位的 `ADMIN_PASSWORD`。
+
+`bot` 容器被放在独立 profile 中，方便没有 Telegram token 时只跑本地服务：
 
 ```bash
 docker compose --profile app --profile bot up --build
 ```
 
-Webhook worker mode is available through the `bot-worker` service:
+webhook worker 使用 `bot-worker` 服务：
 
 ```bash
 docker compose --profile app --profile worker up --build
 ```
 
-In webhook mode, the Hono API only validates Telegram's secret token and enqueues the raw update. The worker consumes BullMQ jobs and runs the same grammY middleware stack used by long polling.
-The worker profile enables asynchronous memory enrichment; local polling keeps memory creation inline by default unless `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true` is set.
+webhook 模式下，Hono API 只校验 Telegram secret token 并把原始 update 入队。worker 消费 BullMQ job，并运行和 long polling 相同的 grammY middleware 栈。
 
-`pnpm test:e2e` validates both the Hono API and grammY bot core paths, including multi-turn user-impression memory: first-turn memory creation, second-turn memory retrieval, prompt injection, and natural recall in Makoto's reply.
+`worker` profile 会启用异步记忆增强；本地 polling 默认 inline 创建记忆，除非显式设置 `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`。
 
-Image generation is available through:
+## 验证
 
-- API: `POST /api/images` with `{ "prompt": "...", "size": "1024x1024", "n": 1 }`
-- Telegram: `/draw 稻妻夜色里的樱花与柔和雷光`
+`pnpm test:e2e` 会验证 Hono API 和 grammY bot 核心路径，包括多轮用户印象记忆：第一轮创建记忆、第二轮检索记忆、注入 prompt，并在雷电真的回复中自然回忆。
 
-Web search is available through:
+常用验证命令：
 
-- API: `POST /api/search` with `{ "query": "...", "maxResults": 5 }`
-- API: `GET /api/search/tools` to inspect the Boot tool registry
-- Telegram: `/search Codex CLI 工具架构`
-- Chat auto-use: messages containing explicit search intent such as `联网搜索`, `查一下`, `最新`, or `新闻`
+```bash
+pnpm check
+pnpm build
+pnpm test:e2e
+pnpm --filter @raiden/bot check
+pnpm --filter @raiden/server check
+pnpm --filter @raiden/panel check
+```
 
-Response cache behavior:
+## 图片生成
 
-- L1 exact cache: per-user normalized query match; no embedding or LLM call.
-- L2 semantic cache: Redis Stack vector search over the query embedding; default threshold is `0.92`.
-- L3 cold path: full boot conversation pipeline; successful standalone answers are cached for `BOOT_SEMANTIC_CACHE_TTL_SECONDS`.
+图片生成入口：
 
-The cache is intentionally per user by default because replies can include persona, conversation, search, and private memory context. Explicit search/current-events requests, contextual follow-ups, memory recall, and memory/profile mutation requests are excluded from response caching. Cache reads and writes are best-effort and fail open after `BOOT_SEMANTIC_CACHE_TIMEOUT_MS`.
-Cache keys also include a conversation context fingerprint built from the active models, search provider, recent message window, and recent memory metadata, so a reply generated in one conversational state is not reused after the surrounding context changes.
+- API：`POST /api/images`，body 为 `{ "prompt": "...", "size": "1024x1024", "n": 1 }`
+- Telegram：`/draw 稻妻夜色里的樱花与柔和雷光`
+- Telegram 自然语言：例如“帮我画一张稻妻雨夜的真”，机器人会自主选择生图工具
 
-## AI Relay Configuration
+实际生图模型固定为 `chatgpt-image-latest`。机器人会先用当前对话模型生成更适合图片模型的提示词，再调用生图工具。
 
-The boot client supports separate OpenAI-compatible providers per capability:
+## 联网搜索
 
-| Capability | Base URL | API key | Model | Notes |
+搜索入口：
+
+- API：`POST /api/search`，body 为 `{ "query": "...", "maxResults": 5 }`
+- API：`GET /api/search/tools`，查看 Boot tool registry
+- Telegram 自然语言：机器人会根据消息语义自主决定是否搜索，例如时事、最新版本、价格、新闻、链接、来源核验等
+
+## 响应缓存
+
+- L1 exact cache：按用户隔离的标准化 query 精确匹配，不调用 embedding 或 LLM。
+- L2 semantic cache：Redis Stack 基于 query embedding 做向量搜索，默认阈值为 `0.92`。
+- L3 cold path：完整 boot conversation pipeline；成功的独立回答会缓存 `BOOT_SEMANTIC_CACHE_TTL_SECONDS`。
+
+响应缓存默认按用户隔离，因为回复可能包含人格、上下文、搜索结果和私有记忆。显式搜索、时事请求、上下文追问、记忆召回、记忆或画像变更请求不会进入响应缓存。缓存读写都是 best effort，并会在 `BOOT_SEMANTIC_CACHE_TIMEOUT_MS` 后 fail open。
+
+缓存 key 还包含 conversation context fingerprint，来源包括当前模型、搜索 provider、最近消息窗口和最近记忆 metadata，避免一个对话状态下生成的回复在上下文变化后被错误复用。
+
+## AI Relay 配置
+
+boot 客户端支持按能力拆分 OpenAI-compatible provider：
+
+| 能力 | Base URL | API key | 模型 | 说明 |
 | --- | --- | --- | --- | --- |
-| Chat | `BOOT_CHAT_BASE_URL` or `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` or `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | Default chat model is `gpt-5.5`; the configured proxy requires streaming chat completions. |
-| Embedding | `BOOT_EMBEDDING_BASE_URL` or `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` or `BOOT_API_KEY` | `BOOT_EMBEDDING_MODEL` | Must return exactly 3072 dimensions because memories are stored as `halfvec(3072)`. |
-| Image | `BOOT_IMAGE_BASE_URL` or `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` or `BOOT_API_KEY` | `BOOT_IMAGE_MODEL` | Used by `POST /api/images` and Telegram `/draw`. Returns base64 images. |
-| Web search | `BOOT_SEARCH_BASE_URL` or provider default | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | Supported providers: `tavily`, `brave`, `serper`. Default is `disabled`. |
+| Chat | `BOOT_CHAT_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` 或 `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | 默认对话模型为 `gpt-5.5`；可在后台或 Telegram `/model` 切换；当前 proxy 要求 streaming chat completions。 |
+| Embedding | `BOOT_EMBEDDING_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` 或 `BOOT_API_KEY` | 固定 `text-embedding-3-large` | 必须返回 3072 维，因为长期记忆存储为 `halfvec(3072)`。 |
+| Image | `BOOT_IMAGE_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` 或 `BOOT_API_KEY` | 固定 `chatgpt-image-latest` | 用于 `POST /api/images`、Telegram `/draw` 和自然语言自主生图，返回 base64 图片。 |
+| Web search | `BOOT_SEARCH_BASE_URL` 或 provider 默认地址 | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | 支持 `tavily`、`brave`、`serper`，默认 `disabled`。 |
 
-The admin panel's System page can persist these values into PostgreSQL `runtime_settings`. Runtime settings take precedence over `.env`, are audited, and are read by both the Hono API and the grammY bot on the next request. Secret values are write-only and stored with AES-256-GCM when `BOOT_SETTINGS_ENCRYPTION_KEY` is set.
+管理后台 System 页可以把这些值保存到 PostgreSQL `runtime_settings`。runtime settings 优先于 `.env`，会记录 audit，并会被 Hono API 和 grammY bot 在下一次请求中读取。secret 字段为 write-only；设置 `BOOT_SETTINGS_ENCRYPTION_KEY` 后会使用 AES-256-GCM 加密存储。嵌入模型和生图模型在运行时强制固定，后台只展示只读状态。
 
-For `new-api`, choose the `new-api` preset in System and point `BOOT_BASE_URL` to the gateway's OpenAI-compatible `/v1` endpoint, for example `https://new-api.example.com/v1`. Use the model names exposed by that gateway for chat/image, and keep the embedding model mapped to a 3072-dimensional provider for memory.
+使用 `new-api` 时，在 System 页选择 `new-api` preset，并把 `BOOT_BASE_URL` 指向 gateway 的 OpenAI-compatible `/v1` endpoint，例如 `https://new-api.example.com/v1`。对话模型列表来自 provider `/models`；`/model <model_id>` 会先校验模型存在并做一次轻量 chat probe，成功后才在同一事务内写入运行时配置和审计日志。
 
-Known working split configuration:
+已验证的分离配置：
 
 ```env
 BOOT_BASE_URL=https://proxy.xhblog.top:3000/v1
@@ -111,11 +169,13 @@ BOOT_EMBEDDING_MODEL=text-embedding-3-large
 BOOT_EMBEDDING_API_KEY=
 
 BOOT_IMAGE_BASE_URL=https://api.burn.hair/v1
-BOOT_IMAGE_MODEL=gpt-image-1
+BOOT_IMAGE_MODEL=chatgpt-image-latest
 BOOT_IMAGE_API_KEY=
 
 BOOT_SEARCH_PROVIDER=disabled
 BOOT_SEARCH_API_KEY=
+BOOT_WIKIPEDIA_API_URL=https://zh.wikipedia.org/w/api.php
+BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
 BOOT_SEARCH_MAX_RESULTS=5
 BOOT_SEARCH_DEPTH=basic
 BOOT_CHAT_TIMEOUT_MS=90000
@@ -125,40 +185,79 @@ BOOT_SEARCH_TIMEOUT_MS=15000
 BOOT_SETTINGS_ENCRYPTION_KEY=
 ```
 
-If one relay key can access every capability, set only `BOOT_API_KEY` and omit the capability-specific keys.
+如果一个 relay key 能访问全部能力，只设置 `BOOT_API_KEY` 即可，能力级 key 可以留空。
 
-Search provider defaults:
+已验证的单 relay 配置：
 
-- `tavily`: `https://api.tavily.com/search`, bearer token auth, uses `BOOT_SEARCH_DEPTH` (`basic` or `advanced`).
-- `brave`: `https://api.search.brave.com/res/v1/web/search`, `X-Subscription-Token` auth.
-- `serper`: `https://google.serper.dev/search`, `X-API-KEY` auth.
+```env
+BOOT_BASE_URL=https://proxy.xhblog.top:3000/v1
+BOOT_CHAT_BASE_URL=
+BOOT_EMBEDDING_BASE_URL=
+BOOT_API_KEY=
+BOOT_CHAT_MODEL=gpt-5.5
+BOOT_EMBEDDING_MODEL=text-embedding-3-large
+BOOT_SEARCH_PROVIDER=disabled
+BOOT_WIKIPEDIA_API_URL=https://zh.wikipedia.org/w/api.php
+BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
+```
 
-## Packages
+如果 embedding endpoint 不返回 3072 维，pgvector 写入和长期记忆检索会失败；此时应更换 embedding base URL/key，而不是更换模型名。
 
-- `packages/shared`: shared schemas, API types, and Raiden Makoto persona prompt
-- `packages/database`: Drizzle schema, pgvector memory repository, migrations config
-- `packages/server`: Hono API and typed routes
-- `packages/bot`: grammY Telegram bot
-- `packages/panel`: Refine admin panel
+## Telegram 命令设计
 
-Boot tool architecture notes live in `docs/boot-tools.md`. New user-facing bot capabilities should enter through `packages/shared/src/tools.ts` and then be exposed by API/bot adapters.
+公开命令保持精简：
 
-## Local Skills
+- `/start`：显示欢迎信息；不是开始聊天的前置条件
+- `/help`：显示帮助
+- `/model`：查看当前对话模型
+- `/model list`：查看 provider `/models` 返回的可用模型
+- `/model <model_id>`：切换全局对话模型；所有已获准聊天的用户都可以使用，会写入审计日志
+- `/draw <描述>`：强制直接生图
 
-This repo follows the same local-agent convention as `DocCopilotMonorepo`:
+不再公开 `/memory`、`/recall`、`/search`、`/status`。长期记忆浏览、语义召回、运行状态、模型和工具配置都在 Web 管理后台处理。普通聊天不需要 `/start`；机器人会在对话中自主决定是否调用搜索或绘图工具。
 
-- Root agent entry files: `AGENTS.md`, `CLAUDE.md`
-- Root skill guides: `.agents/skills.md`, `.claude/skills.md`
-- Root reusable skills: `skills/*`
-- SDD plan skill: `skills/plan-task` (`SDD模式` / `sdd:plan` / `/plan-task` map to the installer's `plan-task` skill)
-- Panel agent entry files: `packages/panel/AGENTS.md`, `packages/panel/CLAUDE.md`
-- Panel skill guides: `packages/panel/.agents/skills.md`, `packages/panel/.claude/skills.md`
-- Panel reusable skills migrated from DocCopilot `app/web`: `packages/panel/skills/*`
+Docker 宿主机覆盖项：
 
-DocCopilot-specific skills were not copied. Raiden-specific replacements live in `skills/raiden-project-*` and `packages/panel/skills/raiden-panel-standards`.
+```env
+POSTGRES_CONTAINER_NAME=raiden-shin-postgres
+POSTGRES_PORT=5432
+REDIS_CONTAINER_NAME=raiden-shin-redis
+REDIS_PORT=6379
+```
 
-The `product-designer` skill is also installed under `.agents/skills/product-designer` and locked in `skills-lock.json` for Codex skill installation compatibility.
+搜索 provider 默认地址：
 
-## Persona Notes
+- `tavily`：`https://api.tavily.com/search`，bearer token auth，使用 `BOOT_SEARCH_DEPTH`，可选 `basic` 或 `advanced`
+- `brave`：`https://api.search.brave.com/res/v1/web/search`，`X-Subscription-Token` auth
+- `serper`：`https://google.serper.dev/search`，`X-API-KEY` auth
 
-Makoto is modeled as gentle, observant, humane, and attached to the beauty of passing moments. The prompt intentionally avoids Ei's severe stillness and leans into Makoto's version of eternity: memory, care, and the value of each present moment.
+## 包结构
+
+- `packages/shared`：共享 schema、API 类型、雷电真人格 prompt、AI boot 客户端
+- `packages/database`：Drizzle schema、pgvector 记忆仓储层、迁移配置
+- `packages/boot`：跨入口聊天编排层，负责用户身份、消息、embedding、长期记忆、搜索和回复生成
+- `packages/server`：Hono API 与 typed routes
+- `packages/bot`：grammY Telegram bot
+- `packages/panel`：Refine 管理后台
+
+Boot tool 架构说明位于 `docs/boot-tools.md`。新增面向用户的 bot 能力时，应先进入 `packages/shared/src/tools.ts`，再由 API/bot adapter 暴露出去。
+
+## 本地 Agent 约定
+
+本仓库遵循和 `DocCopilotMonorepo` 相同的本地 agent 约定：
+
+- 根入口文件：`AGENTS.md`、`CLAUDE.md`
+- 根 skill 路由：`.agents/skills.md`、`.claude/skills.md`
+- 根可复用技能：`skills/*`
+- SDD plan 技能：`skills/plan-task`，`SDD模式`、`sdd:plan`、`/plan-task` 会映射到 installer 的 `plan-task` skill
+- Panel 入口文件：`packages/panel/AGENTS.md`、`packages/panel/CLAUDE.md`
+- Panel skill 路由：`packages/panel/.agents/skills.md`、`packages/panel/.claude/skills.md`
+- Panel 可复用技能：`packages/panel/skills/*`
+
+DocCopilot 专属技能没有复制。本项目的替代技能位于 `skills/raiden-project-*` 和 `packages/panel/skills/raiden-panel-standards`。
+
+`product-designer` skill 也安装在 `.agents/skills/product-designer`，并通过 `skills-lock.json` 锁定，方便 Codex skill installer 兼容。
+
+## 人格说明
+
+雷电真被建模为温柔、敏锐、有人情味，并珍视流逝瞬间之美的角色。prompt 有意避开雷电影偏严肃的永恒观，更贴近真所理解的永恒：记忆、关怀，以及每一个当下的价值。

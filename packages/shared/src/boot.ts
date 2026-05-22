@@ -3,12 +3,21 @@ import { embed, generateImage } from "ai";
 import { z } from "zod";
 import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
-import type { WebSearchResponse } from "./schemas.js";
-import { formatWebSearchResultsForPrompt } from "./tools.js";
+import {
+  bootToolDecisionSchema,
+  providerModelListResponseSchema,
+  type BootToolDecision,
+  type ChatModelListResponse,
+  type WebSearchResponse
+} from "./schemas.js";
+import { formatWebSearchResultsForPrompt, shouldUseBootSearchForMessage } from "./tools.js";
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
 const timeoutMs = z.coerce.number().int().min(1_000).max(600_000);
+
+export const fixedBootEmbeddingModel = "text-embedding-3-large";
+export const fixedBootImageModel = "chatgpt-image-latest";
 
 const bootEnvSchema = z.object({
   BOOT_BASE_URL: z.string().url().default("https://proxy.xhblog.top:3000/v1"),
@@ -19,9 +28,9 @@ const bootEnvSchema = z.object({
   BOOT_EMBEDDING_API_KEY: optionalString,
   BOOT_IMAGE_API_KEY: optionalString,
   BOOT_CHAT_MODEL: z.string().default("gpt-5.5"),
-  BOOT_EMBEDDING_MODEL: z.string().default("text-embedding-3-large"),
+  BOOT_EMBEDDING_MODEL: z.string().default(fixedBootEmbeddingModel),
   BOOT_IMAGE_BASE_URL: optionalUrl,
-  BOOT_IMAGE_MODEL: z.string().default("gpt-image-1"),
+  BOOT_IMAGE_MODEL: z.string().default(fixedBootImageModel),
   BOOT_CHAT_TIMEOUT_MS: timeoutMs.default(90_000),
   BOOT_EMBEDDING_TIMEOUT_MS: timeoutMs.default(30_000),
   BOOT_IMAGE_TIMEOUT_MS: timeoutMs.default(180_000)
@@ -50,7 +59,12 @@ export class BootProviderError extends Error {
 }
 
 export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig {
-  return bootEnvSchema.parse(env);
+  const config = bootEnvSchema.parse(env);
+  return {
+    ...config,
+    BOOT_EMBEDDING_MODEL: fixedBootEmbeddingModel,
+    BOOT_IMAGE_MODEL: fixedBootImageModel
+  };
 }
 
 function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" | "image") {
@@ -58,7 +72,7 @@ function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" 
     return value;
   }
 
-  throw new Error(`BOOT_${purpose.toUpperCase()}_API_KEY or BOOT_API_KEY is required`);
+  throw new BootProviderError(`BOOT_${purpose.toUpperCase()}_API_KEY or BOOT_API_KEY is required`, 503);
 }
 
 function createEmbeddingProvider(config = getBootConfig()) {
@@ -329,11 +343,81 @@ function chatProviderError(statusCode: number, body: string) {
     message = body.slice(0, 500) || message;
   }
 
-  return new BootProviderError(`AI relay failed with HTTP ${statusCode}: ${message}`, statusCode);
+  const exposedStatusCode = statusCode === 401 || statusCode === 403 ? 502 : statusCode;
+  return new BootProviderError(`AI relay failed with HTTP ${statusCode}: ${message}`, exposedStatusCode);
 }
 
 function joinUrl(baseUrl: string, path: string) {
   return new URL(path.replace(/^\//, ""), baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+}
+
+export async function listChatModels(config = getBootConfig()): Promise<ChatModelListResponse> {
+  const source = joinUrl(config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL, "/models");
+  const response = await fetchProvider(
+    source,
+    {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${resolveApiKey(config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY, "chat")}`,
+        accept: "application/json"
+      }
+    },
+    config.BOOT_CHAT_TIMEOUT_MS,
+    "AI relay models"
+  );
+
+  const body = await readProviderText(response, config.BOOT_CHAT_TIMEOUT_MS, "AI relay models");
+  if (!response.ok) {
+    throw chatProviderError(response.status, body);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new BootProviderError(`AI relay returned an invalid models response: ${body.slice(0, 160)}`);
+  }
+
+  const parsed = providerModelListResponseSchema.parse(payload);
+  const models = parsed.data
+    .filter((model) => isLikelyChatModelId(model.id))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return {
+    currentModel: config.BOOT_CHAT_MODEL,
+    models,
+    source: source.toString()
+  };
+}
+
+export function isLikelyChatModelId(modelId: string) {
+  const normalized = modelId.toLowerCase();
+  if (normalized === fixedBootEmbeddingModel || normalized === fixedBootImageModel) {
+    return false;
+  }
+
+  return ![
+    "embedding",
+    "text-embedding",
+    "image",
+    "gpt-image",
+    "dall-e",
+    "whisper",
+    "tts",
+    "moderation",
+    "rerank"
+  ].some((marker) => normalized.includes(marker));
+}
+
+export async function probeChatModel(modelId: string, config = getBootConfig()) {
+  const candidateConfig = {
+    ...config,
+    BOOT_CHAT_MODEL: modelId
+  };
+  await generateStreamedText({
+    config: candidateConfig,
+    system: "You are a health probe. Reply with exactly OK.",
+    prompt: "OK"
+  });
 }
 
 export async function embedText(value: string, config = getBootConfig()): Promise<number[]> {
@@ -401,6 +485,176 @@ ${input.content}
 
 请以雷电真的语气自然回应。`
   });
+}
+
+export async function planMakotoToolUse(input: {
+  content: string;
+  history?: ChatHistoryItem[];
+  config?: BootConfig;
+}): Promise<BootToolDecision> {
+  const config = input.config ?? getBootConfig();
+  try {
+    const historyText = (input.history ?? [])
+      .slice(-6)
+      .map((item) => `${item.role}: ${item.content}`)
+      .join("\n");
+    const text = await generateStreamedText({
+      config,
+      system: "你是雷电真机器人的工具规划器。只输出一个 JSON 对象，不要输出 Markdown、解释或代码块。",
+      prompt: `请判断本轮是否需要调用工具。
+
+可选 action：
+- "none"：普通对话、闲聊、解释、写作、记忆相关表达，不需要外部工具。
+- "web_search"：用户要求查询、搜索、联网、来源、链接、最新/今天/现在/新闻/价格/版本/事实核验，或问题明显依赖实时信息。
+- "makoto_image"：用户要求画图、生图、生成图片、头像、壁纸、插画、视觉画面。
+
+输出 JSON 结构：
+{"action":"none|web_search|makoto_image","reason":"一句中文原因","query":"搜索词或 null","prompt":"生图意图或 null"}
+
+约束：
+- action 为 web_search 时，query 必须是适合搜索的一句话。
+- action 为 makoto_image 时，prompt 必须保留用户想要的画面主体、风格和限制。
+- 不要因为普通聊天主动搜索；不要因为用户要求写文字而生图。
+
+近期对话：
+${historyText || "暂无。"}
+
+用户消息：
+${input.content}`
+    });
+    const parsed = parseToolDecision(text);
+    if (isPlannerFormatFallbackReason(parsed.reason)) {
+      const deterministic = deterministicToolDecisionFallback(input.content, parsed.reason);
+      if (deterministic) {
+        return deterministic;
+      }
+    }
+
+    return normalizeToolDecision(parsed, input.content);
+  } catch {
+    return deterministicToolDecisionFallback(input.content, "工具规划失败，使用确定性意图兜底。") ?? {
+      action: "none",
+      reason: "工具规划失败，回退为普通对话。",
+      query: null,
+      prompt: null
+    };
+  }
+}
+
+export async function generateMakotoImagePrompt(input: {
+  userPrompt: string;
+  userName?: string | null;
+  history?: ChatHistoryItem[];
+  config?: BootConfig;
+}) {
+  const config = input.config ?? getBootConfig();
+  const historyText = (input.history ?? [])
+    .slice(-6)
+    .map((item) => `${item.role}: ${item.content}`)
+    .join("\n");
+  const prompt = await generateStreamedText({
+    config,
+    system:
+      "你是图像提示词生成器。将用户意图改写成可直接用于图像生成模型的高质量提示词。只输出提示词正文，不要 Markdown。",
+    prompt: `角色基调：雷电真，温柔、优雅、稻妻、樱花、柔和雷光、人情味。不要生成文字、logo、水印、UI、官方截图。
+
+用户：${input.userName ?? "旅行者"}
+近期对话：
+${historyText || "暂无。"}
+
+用户画面需求：
+${input.userPrompt}
+
+请输出不超过 900 字符的提示词，保留用户指定主体；必要时补充构图、光线、氛围和细节。`
+  });
+
+  return prompt.slice(0, 900).trim() || input.userPrompt;
+}
+
+function parseToolDecision(text: string): BootToolDecision {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  const jsonText = fenced ?? trimmed.match(/\{[\s\S]*\}/)?.[0] ?? trimmed;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(jsonText);
+  } catch {
+    return {
+      action: "none",
+      reason: "工具规划返回格式不可解析。",
+      query: null,
+      prompt: null
+    } satisfies BootToolDecision;
+  }
+
+  const parsed = bootToolDecisionSchema.safeParse(payload);
+  if (!parsed.success) {
+    return {
+      action: "none",
+      reason: "工具规划返回字段不完整。",
+      query: null,
+      prompt: null
+    } satisfies BootToolDecision;
+  }
+
+  return parsed.data;
+}
+
+function normalizeToolDecision(decision: BootToolDecision, content: string): BootToolDecision {
+  if (decision.action === "web_search") {
+    return {
+      ...decision,
+      query: decision.query?.trim() || content.slice(0, 500),
+      prompt: null
+    };
+  }
+
+  if (decision.action === "makoto_image") {
+    return {
+      ...decision,
+      query: null,
+      prompt: decision.prompt?.trim() || content.slice(0, 2000)
+    };
+  }
+
+  return {
+    action: "none",
+    reason: decision.reason,
+    query: null,
+    prompt: null
+  };
+}
+
+function isPlannerFormatFallbackReason(reason: string) {
+  return reason === "工具规划返回格式不可解析。" || reason === "工具规划返回字段不完整。";
+}
+
+function deterministicToolDecisionFallback(content: string, reason: string): BootToolDecision | null {
+  if (shouldUseMakotoImageForMessage(content)) {
+    return {
+      action: "makoto_image",
+      reason,
+      query: null,
+      prompt: content.slice(0, 2000)
+    };
+  }
+
+  if (shouldUseBootSearchForMessage(content)) {
+    return {
+      action: "web_search",
+      reason,
+      query: content.slice(0, 500),
+      prompt: null
+    };
+  }
+
+  return null;
+}
+
+function shouldUseMakotoImageForMessage(content: string) {
+  return /(画|绘制|画图|生图|出图|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
+    content
+  );
 }
 
 export async function summarizeForMemory(input: {

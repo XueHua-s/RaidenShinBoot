@@ -206,6 +206,8 @@ async function main() {
       return response.json() as Promise<{
         data: {
           bootBaseUrl?: string;
+          bootEmbeddingModel?: string;
+          bootImageModel?: string;
           bootSearchProvider?: string;
           secrets?: Record<string, boolean>;
         };
@@ -308,8 +310,6 @@ async function main() {
       bootEmbeddingBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootImageBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootChatModel: "mock-chat",
-      bootEmbeddingModel: "mock-embedding",
-      bootImageModel: "mock-image",
       bootSearchProvider: "tavily",
       bootSearchBaseUrl: `http://127.0.0.1:${port}`,
       bootWikipediaApiUrl: `http://127.0.0.1:${port}/wiki/api.php`,
@@ -321,6 +321,8 @@ async function main() {
     });
     if (
       runtimeSettings.data.bootBaseUrl !== `http://127.0.0.1:${port}/v1` ||
+      runtimeSettings.data.bootEmbeddingModel !== "text-embedding-3-large" ||
+      runtimeSettings.data.bootImageModel !== "chatgpt-image-latest" ||
       runtimeSettings.data.bootSearchProvider !== "tavily" ||
       !runtimeSettings.data.secrets?.bootApiKey ||
       !runtimeSettings.data.secrets.bootSearchApiKey
@@ -777,18 +779,18 @@ async function main() {
           username: "e2e_cache_user",
           content: "请温柔地说明这次验证链路"
         };
-        const chatPromptCountBefore = relayState.chatPrompts.length;
         const firstCacheChat = await runBootConversation(cacheInput);
         if (firstCacheChat.cacheStatus !== "miss") {
           throw new Error(`Semantic cache first chat should miss, got ${firstCacheChat.cacheStatus}`);
         }
         await waitForConversationExactCacheHit(cacheInput);
+        const chatPromptCountAfterFirstCacheChat = relayState.chatPrompts.length;
 
         const secondCacheChat = await runBootConversation(cacheInput);
         if (secondCacheChat.cacheStatus !== "l1_hit") {
           throw new Error(`Semantic cache second chat should hit L1, got ${secondCacheChat.cacheStatus}`);
         }
-        if (relayState.chatPrompts.length !== chatPromptCountBefore + 1) {
+        if (relayState.chatPrompts.length !== chatPromptCountAfterFirstCacheChat) {
           throw new Error("Semantic cache hit should not call the chat model again");
         }
         await waitForConversationExactCacheHit(cacheInput);

@@ -125,11 +125,12 @@ export function getBootSearchConfig(env: NodeJS.ProcessEnv = process.env): BootS
 
 export function isWebSearchConfigured(env: NodeJS.ProcessEnv = process.env) {
   const config = getBootSearchConfig(env);
-  return Boolean(config.BOOT_WIKIPEDIA_API_URL || config.BOOT_MOEGIRL_API_URL || config.BOOT_SEARCH_API_KEY);
+  return config.BOOT_SEARCH_PROVIDER !== "disabled" && Boolean(config.BOOT_WIKIPEDIA_API_URL || config.BOOT_MOEGIRL_API_URL || config.BOOT_SEARCH_API_KEY);
 }
 
 export async function searchWeb(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const context: SearchMachineContext = {
     request: input,
     config,
@@ -144,6 +145,7 @@ export async function searchWeb(input: WebSearchRequest, options: SearchWebOptio
 
 export async function searchGoogle(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await searchGoogleResults(input.query, maxResults, config, options.fetch ?? fetch);
   return {
@@ -158,6 +160,7 @@ export async function searchGoogle(input: WebSearchRequest, options: SearchWebOp
 
 export async function searchWikipedia(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await mediaWikiSearch({
     query: input.query,
@@ -179,6 +182,7 @@ export async function searchWikipedia(input: WebSearchRequest, options: SearchWe
 
 export async function searchMoegirl(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await mediaWikiSearch({
     query: input.query,
@@ -196,6 +200,16 @@ export async function searchMoegirl(input: WebSearchRequest, options: SearchWebO
     failures: [],
     results
   };
+}
+
+function assertExternalSearchEnabled(config: BootSearchConfig) {
+  if (config.BOOT_SEARCH_PROVIDER === "disabled") {
+    throw new BootSearchError(
+      "search_disabled",
+      "BOOT_SEARCH_PROVIDER is disabled; external search channels are disabled.",
+      503
+    );
+  }
 }
 
 function runSearchStateMachine(context: SearchMachineContext) {

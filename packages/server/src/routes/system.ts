@@ -7,10 +7,10 @@ import {
   type NewRuntimeSetting
 } from "@raiden/database";
 import { updateRuntimeSettingsRequestSchema, type RuntimeSettings } from "@raiden/shared";
-import { getBootConfig } from "@raiden/shared/boot";
+import { fixedBootEmbeddingModel, fixedBootImageModel, getBootConfig, isLikelyChatModelId } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import { zValidator } from "@hono/zod-validator";
-import { loadRuntimeEnv } from "@raiden/boot";
+import { listEffectiveChatModels, loadRuntimeEnv } from "@raiden/boot";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission, type AuthVariables, writeAuditFromContext } from "../auth.js";
@@ -29,8 +29,6 @@ const publicSettingFields = {
   bootWikipediaApiUrl: "BOOT_WIKIPEDIA_API_URL",
   bootMoegirlApiUrl: "BOOT_MOEGIRL_API_URL",
   bootChatModel: "BOOT_CHAT_MODEL",
-  bootEmbeddingModel: "BOOT_EMBEDDING_MODEL",
-  bootImageModel: "BOOT_IMAGE_MODEL",
   bootSearchProvider: "BOOT_SEARCH_PROVIDER",
   bootSearchMaxResults: "BOOT_SEARCH_MAX_RESULTS",
   bootSearchDepth: "BOOT_SEARCH_DEPTH"
@@ -130,8 +128,8 @@ export function healthStatusPayload() {
     bootWikipediaApiUrl: process.env.BOOT_WIKIPEDIA_API_URL ?? defaultWikipediaApiUrl,
     bootMoegirlApiUrl: process.env.BOOT_MOEGIRL_API_URL ?? defaultMoegirlApiUrl,
     bootChatModel: process.env.BOOT_CHAT_MODEL ?? "gpt-5.5",
-    bootEmbeddingModel: process.env.BOOT_EMBEDDING_MODEL ?? "text-embedding-3-large",
-    bootImageModel: process.env.BOOT_IMAGE_MODEL ?? "gpt-image-1",
+    bootEmbeddingModel: fixedBootEmbeddingModel,
+    bootImageModel: fixedBootImageModel,
     bootSearchProvider: process.env.BOOT_SEARCH_PROVIDER ?? "disabled",
     bootSearchMaxResults: Number(process.env.BOOT_SEARCH_MAX_RESULTS ?? "5"),
     bootSearchDepth: process.env.BOOT_SEARCH_DEPTH ?? "basic",
@@ -226,9 +224,18 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
     requirePermission(c, "system:read");
     return c.json({ data: await buildRuntimeSettingsPayload() });
   })
+  .get("/models/chat", async (c) => {
+    requirePermission(c, "system:read");
+    return c.json(await listEffectiveChatModels());
+  })
   .patch("/settings", zValidator("json", updateRuntimeSettingsRequestSchema), async (c) => {
     const admin = requirePermission(c, "system:write");
     const body = c.req.valid("json");
+    if (body.bootChatModel && !isLikelyChatModelId(body.bootChatModel)) {
+      throw new HTTPException(400, {
+        message: "BOOT_CHAT_MODEL must be a chat-capable model. Fixed embedding/image models cannot be used as the chat model."
+      });
+    }
     const before = await buildRuntimeSettingsPayload();
     const deletes: string[] = [];
     const upserts: NewRuntimeSetting[] = [];

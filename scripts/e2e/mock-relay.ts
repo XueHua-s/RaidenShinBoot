@@ -46,6 +46,11 @@ export function createMockRelay(state: MockRelayState) {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/v1/models") {
+        handleModels(res);
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/v1/images/generations") {
         await handleImageGeneration(req, res, state);
         return;
@@ -70,6 +75,18 @@ export function createMockRelay(state: MockRelayState) {
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : "mock relay error" });
     }
+  });
+}
+
+function handleModels(res: ServerResponse) {
+  sendJson(res, 200, {
+    object: "list",
+    data: [
+      { id: "mock-chat", object: "model" },
+      { id: "mock-responses-only", object: "model" },
+      { id: "text-embedding-3-large", object: "model" },
+      { id: "chatgpt-image-latest", object: "model" }
+    ]
   });
 }
 
