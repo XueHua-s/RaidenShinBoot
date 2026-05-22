@@ -617,6 +617,11 @@ function normalizeToolDecision(decision: BootToolDecision, content: string): Boo
     };
   }
 
+  const explicitFallback = deterministicToolDecisionFallback(content, "用户表达包含明确工具意图，覆盖规划器 none 判断。", "strict");
+  if (explicitFallback) {
+    return explicitFallback;
+  }
+
   return {
     action: "none",
     reason: decision.reason,
@@ -629,8 +634,13 @@ function isPlannerFormatFallbackReason(reason: string) {
   return reason === "工具规划返回格式不可解析。" || reason === "工具规划返回字段不完整。";
 }
 
-function deterministicToolDecisionFallback(content: string, reason: string): BootToolDecision | null {
-  if (shouldUseMakotoImageForMessage(content)) {
+function deterministicToolDecisionFallback(
+  content: string,
+  reason: string,
+  mode: "broad" | "strict" = "broad"
+): BootToolDecision | null {
+  const shouldImage = mode === "strict" ? shouldUseExplicitMakotoImageForMessage(content) : shouldUseMakotoImageForMessage(content);
+  if (shouldImage) {
     return {
       action: "makoto_image",
       reason,
@@ -639,7 +649,8 @@ function deterministicToolDecisionFallback(content: string, reason: string): Boo
     };
   }
 
-  if (shouldUseBootSearchForMessage(content)) {
+  const shouldSearch = mode === "strict" ? shouldUseExplicitBootSearchForMessage(content) : shouldUseBootSearchForMessage(content);
+  if (shouldSearch) {
     return {
       action: "web_search",
       reason,
@@ -651,8 +662,20 @@ function deterministicToolDecisionFallback(content: string, reason: string): Boo
   return null;
 }
 
+function shouldUseExplicitMakotoImageForMessage(content: string) {
+  return /(画图|生图|出图|绘制|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw\s+(an?\s+)?image|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
+    content
+  );
+}
+
 function shouldUseMakotoImageForMessage(content: string) {
   return /(画|绘制|画图|生图|出图|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
+    content
+  );
+}
+
+function shouldUseExplicitBootSearchForMessage(content: string) {
+  return /(联网|搜索|搜一下|查一下|帮我查|查找|资料来源|来源|链接|最新|新闻|当前|现在的|目前的|今天.*(新闻|消息|价格|进展|版本)|事实核验|核实|google|谷歌|web\s*search|search\s+the\s+web|look\s+up)/i.test(
     content
   );
 }

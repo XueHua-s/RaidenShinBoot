@@ -26,6 +26,7 @@ import {
 import { app } from "@raiden/server/app";
 import { hashPassword } from "@raiden/server/auth";
 import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
+import { planMakotoToolUse } from "@raiden/shared/boot";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
@@ -147,6 +148,24 @@ async function main() {
   }
   if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
     throw new Error("Standalone non-search prompts should be semantic-cache candidates");
+  }
+  const validNoneSearchDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_SEARCH 请联网搜索 RaidenShinBoot 工具架构。"
+  });
+  if (validNoneSearchDecision.action !== "web_search") {
+    throw new Error(`Explicit search intent should override valid planner none, got ${validNoneSearchDecision.action}`);
+  }
+  const validNoneImageDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_IMAGE 请生成一张稻妻樱花头像。"
+  });
+  if (validNoneImageDecision.action !== "makoto_image") {
+    throw new Error(`Explicit image intent should override valid planner none, got ${validNoneImageDecision.action}`);
+  }
+  const validNoneNonImageDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_NON_IMAGE 请帮我画重点总结这段文字。"
+  });
+  if (validNoneNonImageDecision.action !== "none") {
+    throw new Error(`Non-image writing intent should remain none after valid planner none, got ${validNoneNonImageDecision.action}`);
   }
 
   try {

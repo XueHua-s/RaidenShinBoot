@@ -280,6 +280,15 @@ function resolveMockChatContent(system: string, prompt: string, state: MockRelay
     return resolveMockSummary(prompt, state);
   }
 
+  if (system.includes("工具规划器") && prompt.includes("E2E_VALID_NONE_")) {
+    return JSON.stringify({
+      action: "none",
+      reason: "E2E valid none",
+      query: null,
+      prompt: null
+    });
+  }
+
   state.chatPrompts.push(prompt);
   if (prompt.includes("Responses fallback")) {
     return "Responses fallback 已经接入 bot 核心链路。";

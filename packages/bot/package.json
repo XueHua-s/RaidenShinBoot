@@ -16,6 +16,7 @@
   "dependencies": {
     "@grammyjs/runner": "^2.0.3",
     "@raiden/boot": "workspace:*",
+    "@raiden/database": "workspace:*",
     "@raiden/shared": "workspace:*",
     "dotenv": "^17.2.3",
     "grammy": "^1.43.0",

@@ -183,11 +183,6 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
     ],
     [formatSearchProvider, formatStatus, system, t]
   );
-  const listedChatModelIds = chatModels?.models.map((model) => model.id) ?? [];
-  const hasInvalidListedChatModel = Boolean(
-    form && listedChatModelIds.length > 0 && !listedChatModelIds.includes(form.bootChatModel)
-  );
-
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!form || !canWriteSystem) {
@@ -292,7 +287,7 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
                 <p className="text-xs leading-5 text-zinc-500">{t("system.auditHint")}</p>
                 <div className="flex flex-wrap items-center gap-2">
                   {!canWriteSystem && <Badge tone="warning">{t("common.readOnly")}</Badge>}
-                  <Button disabled={!canWriteSystem || saving || !form.bootBaseUrl.trim() || hasInvalidListedChatModel} type="submit">
+                  <Button disabled={!canWriteSystem || saving || !form.bootBaseUrl.trim()} type="submit">
                     <Save className="size-4" />
                     {saving ? t("common.saving") : t("common.save")}
                   </Button>

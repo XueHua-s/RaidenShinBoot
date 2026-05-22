@@ -332,7 +332,7 @@ function AdminApp() {
         }
       >
         <Route index element={<DashboardPage />} />
-        <Route path="telegram" element={<TelegramPage />} />
+        <Route path="telegram" element={auth.user ? <TelegramPage user={auth.user} /> : <Navigate replace to="/login" />} />
         <Route path="conversations" element={auth.user ? <ConversationsPage user={auth.user} /> : <Navigate replace to="/login" />} />
         <Route path="memory" element={<MemoryPage />} />
         <Route path="security" element={auth.user ? <SecurityPage user={auth.user} /> : <Navigate replace to="/login" />} />
