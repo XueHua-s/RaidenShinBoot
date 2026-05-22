@@ -15,6 +15,23 @@ const hiddenCommandNames = new Set(["model"]);
 const handledCommandNames = new Set([...publicBotCommands.map((command) => command.command), ...hiddenCommandNames]);
 const telegramMessageBudget = 3500;
 
+function configuredTelegramAdminIds(env: NodeJS.ProcessEnv = process.env) {
+  return new Set(
+    (env.BOT_ADMIN_TELEGRAM_IDS ?? "")
+      .split(/[,\s]+/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+}
+
+export function isTelegramBotAdminId(telegramId: string | number | null | undefined, env: NodeJS.ProcessEnv = process.env) {
+  return telegramId !== null && telegramId !== undefined && configuredTelegramAdminIds(env).has(String(telegramId));
+}
+
+function canSwitchTelegramModel(ctx: Context) {
+  return isTelegramBotAdminId(ctx.from?.id);
+}
+
 function updateConstraint(ctx: Context) {
   if (ctx.chat?.id !== undefined) {
     return `chat:${ctx.chat.id}`;
@@ -45,15 +62,54 @@ function trimTelegramCaption(value: string) {
   return value.length > 1000 ? `${value.slice(0, 997)}...` : value;
 }
 
+function splitTelegramText(text: string) {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const line of text.split("\n")) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (candidate.length <= telegramMessageBudget) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+
+    for (let index = 0; index < line.length; index += telegramMessageBudget) {
+      const part = line.slice(index, index + telegramMessageBudget);
+      if (part.length === telegramMessageBudget) {
+        chunks.push(part);
+      } else {
+        current = part;
+      }
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.length > 0 ? chunks : [text];
+}
+
+async function replyTextChunks(ctx: Context, text: string) {
+  for (const chunk of splitTelegramText(text)) {
+    await ctx.reply(chunk);
+  }
+}
+
 async function replyGeneratedImages(ctx: Context, images: Array<{ base64: string; mediaType: string }>, caption: string) {
   if (images.length === 0) {
-    await ctx.reply(caption);
+    await replyTextChunks(ctx, caption);
     return;
   }
 
   const first = images[0];
   if (!first) {
-    await ctx.reply(caption);
+    await replyTextChunks(ctx, caption);
     return;
   }
 
@@ -80,22 +136,7 @@ function formatModelListChunks(input: Awaited<ReturnType<typeof listEffectiveCha
   }
 
   lines.push("", "切换：/model <model_id>");
-  const chunks: string[] = [];
-  let current = "";
-  for (const line of lines) {
-    const next = current ? `${current}\n${line}` : line;
-    if (next.length > telegramMessageBudget && current) {
-      chunks.push(current);
-      current = line;
-    } else {
-      current = next;
-    }
-  }
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks;
+  return splitTelegramText(lines.join("\n"));
 }
 
 function unknownSlashCommand(text: string) {
@@ -134,7 +175,7 @@ export function createRaidenBot(token: string) {
     try {
       if (!modelArg) {
         const models = await listEffectiveChatModels();
-        await ctx.reply([`当前对话模型：${models.currentModel}`, "查看列表：/model list", "切换：/model <model_id>"].join("\n"));
+        await replyTextChunks(ctx, [`当前对话模型：${models.currentModel}`, "查看列表：/model list", "管理员切换：/model <model_id>"].join("\n"));
         return;
       }
 
@@ -142,6 +183,11 @@ export function createRaidenBot(token: string) {
         for (const chunk of formatModelListChunks(await listEffectiveChatModels())) {
           await ctx.reply(chunk);
         }
+        return;
+      }
+
+      if (!canSwitchTelegramModel(ctx)) {
+        await ctx.reply("只有配置在 BOT_ADMIN_TELEGRAM_IDS 的 Telegram 管理员可以切换全局对话模型。");
         return;
       }
 
@@ -202,6 +248,11 @@ export function createRaidenBot(token: string) {
   });
 
   bot.on("message:text", async (ctx) => {
+    if (!ctx.from) {
+      await ctx.reply("当前消息缺少 Telegram 用户身份，无法进入个人对话。");
+      return;
+    }
+
     const text = ctx.message.text.trim();
     if (!text) {
       return;
@@ -219,7 +270,7 @@ export function createRaidenBot(token: string) {
       return;
     }
 
-    await ctx.reply(result.reply);
+    await replyTextChunks(ctx, result.reply);
   });
 
   bot.catch((error) => {

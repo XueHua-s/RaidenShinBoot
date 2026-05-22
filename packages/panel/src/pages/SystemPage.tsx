@@ -232,7 +232,15 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
   }
 
   return (
-    <ResourcePage title={t("system.title")} description={t("system.description")} error={error} loading={!system && !error} onRefresh={load}>
+    <ResourcePage
+      title={t("system.title")}
+      description={t("system.description")}
+      error={error}
+      loading={!system && !error}
+      onRefresh={async () => {
+        await Promise.all([load(), loadChatModels()]);
+      }}
+    >
       {notice && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
           {notice}
@@ -260,8 +268,9 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
           </CardHeader>
           <CardContent>
             <form className="grid gap-5" onSubmit={saveSettings}>
-              <GatewayPresetSection form={form} t={t} updateForm={updateForm} />
+              <GatewayPresetSection canWriteSystem={canWriteSystem} form={form} t={t} updateForm={updateForm} />
               <EndpointAndModelSections
+                canWriteSystem={canWriteSystem}
                 chatModels={chatModels}
                 chatModelsError={chatModelsError}
                 chatModelsLoading={chatModelsLoading}
@@ -272,6 +281,7 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
                 onRefreshChatModels={loadChatModels}
               />
               <SearchAndSecretSections
+                canWriteSystem={canWriteSystem}
                 form={form}
                 formatDepth={formatDepth}
                 formatSearchProvider={formatSearchProvider}
@@ -302,10 +312,12 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
 }
 
 function GatewayPresetSection({
+  canWriteSystem,
   form,
   t,
   updateForm
 }: {
+  canWriteSystem: boolean;
   form: RuntimeSettingsForm;
   t: I18nContextValue["t"];
   updateForm: (patch: Partial<RuntimeSettingsForm>) => void;
@@ -327,8 +339,10 @@ function GatewayPresetSection({
           <button
             className={cn(
               "h-10 rounded-md text-sm font-semibold transition",
-              form.gatewayPreset === value ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-600 hover:bg-white"
+              form.gatewayPreset === value ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-600 hover:bg-white",
+              !canWriteSystem && "cursor-not-allowed opacity-60"
             )}
+            disabled={!canWriteSystem}
             key={value}
             type="button"
             onClick={() => updateForm({ gatewayPreset: value as RuntimeSettings["gatewayPreset"] })}
@@ -342,6 +356,7 @@ function GatewayPresetSection({
 }
 
 function EndpointAndModelSections({
+  canWriteSystem,
   chatModels,
   chatModelsError,
   chatModelsLoading,
@@ -351,6 +366,7 @@ function EndpointAndModelSections({
   updateForm,
   onRefreshChatModels
 }: {
+  canWriteSystem: boolean;
   chatModels: ChatModelListResponse | null;
   chatModelsError: string | null;
   chatModelsLoading: boolean;
@@ -373,6 +389,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.defaultBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootBaseUrl}
             onChange={(event) => updateForm({ bootBaseUrl: event.target.value })}
             placeholder="https://new-api.example.com/v1"
@@ -381,6 +398,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.chatBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootChatBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootChatBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -389,6 +407,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.embeddingBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootEmbeddingBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootEmbeddingBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -397,6 +416,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.imageBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootImageBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootImageBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -420,6 +440,7 @@ function EndpointAndModelSections({
           {chatModelIds.length > 0 ? (
             <select
               className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+              disabled={!canWriteSystem}
               value={form.bootChatModel}
               onChange={(event) => updateForm({ bootChatModel: event.target.value })}
             >
@@ -435,7 +456,11 @@ function EndpointAndModelSections({
               ))}
             </select>
           ) : (
-            <Input value={form.bootChatModel} onChange={(event) => updateForm({ bootChatModel: event.target.value })} />
+            <Input
+              disabled={!canWriteSystem}
+              value={form.bootChatModel}
+              onChange={(event) => updateForm({ bootChatModel: event.target.value })}
+            />
           )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
             <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
@@ -452,12 +477,12 @@ function EndpointAndModelSections({
         </div>
         <Label>
           {t("system.embeddingModel")}
-          <Input readOnly value={form.bootEmbeddingModel} />
+          <Input disabled={!canWriteSystem} readOnly value={form.bootEmbeddingModel} />
           <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <Label>
           {t("system.imageModel")}
-          <Input readOnly value={form.bootImageModel} />
+          <Input disabled={!canWriteSystem} readOnly value={form.bootImageModel} />
           <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <div className="grid grid-cols-2 gap-3 text-xs">
@@ -478,6 +503,7 @@ function EndpointAndModelSections({
 }
 
 function SearchAndSecretSections({
+  canWriteSystem,
   form,
   formatDepth,
   formatSearchProvider,
@@ -489,6 +515,7 @@ function SearchAndSecretSections({
   updateForm,
   dispatchDraft
 }: {
+  canWriteSystem: boolean;
   form: RuntimeSettingsForm;
   formatDepth: I18nContextValue["formatDepth"];
   formatSearchProvider: I18nContextValue["formatSearchProvider"];
@@ -514,6 +541,7 @@ function SearchAndSecretSections({
           {t("system.provider")}
           <select
             className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+            disabled={!canWriteSystem}
             value={form.bootSearchProvider}
             onChange={(event) => updateForm({ bootSearchProvider: event.target.value as RuntimeSettings["bootSearchProvider"] })}
           >
@@ -526,6 +554,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.searchBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootSearchBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootSearchBaseUrl: event.target.value || null })}
             placeholder={t("system.providerDefault")}
@@ -534,6 +563,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.wikipediaApiUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootWikipediaApiUrl}
             onChange={(event) => updateForm({ bootWikipediaApiUrl: event.target.value })}
             placeholder="https://zh.wikipedia.org/w/api.php"
@@ -542,6 +572,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.moegirlApiUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootMoegirlApiUrl}
             onChange={(event) => updateForm({ bootMoegirlApiUrl: event.target.value })}
             placeholder="https://zh.moegirl.org.cn/api.php"
@@ -551,6 +582,7 @@ function SearchAndSecretSections({
           <Label>
             {t("system.maxResults")}
             <Input
+              disabled={!canWriteSystem}
               max={10}
               min={1}
               type="number"
@@ -562,6 +594,7 @@ function SearchAndSecretSections({
             {t("system.depth")}
             <select
               className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+              disabled={!canWriteSystem}
               value={form.bootSearchDepth}
               onChange={(event) => updateForm({ bootSearchDepth: event.target.value as RuntimeSettings["bootSearchDepth"] })}
             >
@@ -594,7 +627,7 @@ function SearchAndSecretSections({
               <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                 <Input
                   autoComplete="off"
-                  disabled={secretClears[key]}
+                  disabled={!canWriteSystem || secretClears[key]}
                   placeholder={settings.secrets[key] ? t("common.keepSecret") : t("common.pasteSecret")}
                   type="password"
                   value={secretValues[key]}
@@ -604,6 +637,7 @@ function SearchAndSecretSections({
                   <input
                     checked={secretClears[key]}
                     className="size-4 accent-cyan-600"
+                    disabled={!canWriteSystem}
                     type="checkbox"
                     onChange={(event) => dispatchDraft({ type: "setSecretClear", key, value: event.target.checked })}
                   />

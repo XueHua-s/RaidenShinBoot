@@ -1,6 +1,8 @@
 import {
   applyRuntimeSettingsChangesWithAudit,
+  createAuditLog,
   createMemory,
+  findConversationTurnByTelegramMessage,
   getRecentMessages,
   getRuntimeSettingsEnvOverrides,
   listMemories,
@@ -27,6 +29,7 @@ import {
   executeBootTool,
   formatBootToolError,
   type BootToolContext,
+  type BootToolAuditEvent,
   type BootToolInput,
   type BootToolName,
   type BootToolOutput,
@@ -46,6 +49,7 @@ import {
 } from "./semantic-cache.js";
 
 let runtimeSettingsWarningEmitted = false;
+type BootToolAuditHandler = NonNullable<BootToolContext["audit"]>;
 
 export type BootProtocol = "telegram" | "web" | "wechat" | (string & {});
 
@@ -60,7 +64,10 @@ export type BootUserIdentity = {
 
 export type BootConversationInput = BootUserIdentity & {
   content: string;
+  sourceChatId?: string | null;
   sourceMessageId?: number | null;
+  toolPermission?: BootToolPermissionContext;
+  toolAudit?: BootToolAuditHandler;
 };
 
 type DurableMemoryInput = {
@@ -106,6 +113,64 @@ function envFlag(value: string | undefined, fallback: boolean) {
   return !["0", "false", "no", "off", "disabled"].includes(normalized);
 }
 
+function defaultToolPermission(input: BootConversationInput): BootToolPermissionContext {
+  return {
+    actorId: input.userId,
+    chatId: null
+  };
+}
+
+function permissionHasToolName(list: readonly string[] | undefined, name: BootToolName) {
+  return Boolean(list?.some((item) => item.toLowerCase() === name));
+}
+
+function toolAllowedByRuntimePolicy(name: BootToolName, permission: BootToolPermissionContext) {
+  if (permissionHasToolName(permission.deniedToolNames, name)) {
+    return false;
+  }
+
+  return !permission.allowedToolNames || permissionHasToolName(permission.allowedToolNames, name);
+}
+
+function safeAuditAfter(event: BootToolAuditEvent): Record<string, unknown> {
+  return {
+    toolName: event.toolName,
+    status: event.status,
+    durationMs: event.durationMs,
+    readOnly: event.readOnly,
+    destructive: event.destructive,
+    concurrencySafe: event.concurrencySafe,
+    actorId: event.actorId ?? null,
+    chatId: event.chatId ?? null,
+    inputSummary: event.inputSummary ?? null,
+    resultSizeChars: event.resultSizeChars ?? null,
+    error: event.error ?? null
+  };
+}
+
+function actorAdminIdFromToolEvent(event: BootToolAuditEvent) {
+  const actorId = event.actorId ?? "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(actorId)
+    ? actorId
+    : null;
+}
+
+function defaultBootToolAudit(): BootToolAuditHandler {
+  return async (event) => {
+    if (!process.env.DATABASE_URL) {
+      return;
+    }
+
+    await createAuditLog({
+      actorAdminId: actorAdminIdFromToolEvent(event),
+      action: `boot_tool.${event.status}`,
+      targetType: "boot_tool",
+      targetId: event.toolName,
+      after: safeAuditAfter(event)
+    });
+  };
+}
+
 export async function loadRuntimeEnv() {
   if (!process.env.DATABASE_URL) {
     return process.env;
@@ -139,7 +204,7 @@ export async function getEffectiveBootSearchConfig() {
 
 export type EffectiveBootToolOptions = {
   permission?: BootToolPermissionContext;
-  audit?: BootToolContext["audit"];
+  audit?: BootToolAuditHandler;
   fetch?: typeof fetch;
   searchConfig?: BootToolContext["searchConfig"];
   imageGenerator?: BootToolContext["imageGenerator"];
@@ -180,6 +245,8 @@ export async function getEffectiveBootToolContext(
   }
   if (options.audit !== undefined) {
     context.audit = options.audit;
+  } else {
+    context.audit = defaultBootToolAudit();
   }
   if (options.fetch !== undefined) {
     context.fetch = options.fetch;
@@ -270,6 +337,31 @@ export async function rememberBootUser(identity: BootUserIdentity) {
   });
 }
 
+function duplicateTelegramTurnReply(turn: NonNullable<Awaited<ReturnType<typeof findConversationTurnByTelegramMessage>>>) {
+  return {
+    reply: turn.assistantMessage.content,
+    memoryCount: 0,
+    webSearchResultCount: 0,
+    webSearchStatus: "skipped" as const,
+    cacheStatus: "disabled" as const,
+    cacheSimilarity: null,
+    toolDecision: {
+      action: "none",
+      reason: "重复的 Telegram message_id，复用已保存回复。",
+      query: null,
+      prompt: null
+    } satisfies BootToolDecision,
+    toolStatus: {
+      name: null,
+      status: "skipped",
+      message: "duplicate telegram message"
+    } satisfies BootToolStatus,
+    images: [] satisfies GeneratedImage[],
+    userMessageId: turn.userMessage.id,
+    assistantMessageId: turn.assistantMessage.id
+  };
+}
+
 export async function runBootConversation(input: BootConversationInput) {
   const runtimeEnv = await loadRuntimeEnv();
   const bootConfig = getBootConfig(runtimeEnv);
@@ -280,6 +372,16 @@ export async function runBootConversation(input: BootConversationInput) {
   const cacheScope = conversationCacheScope({ protocol: input.protocol, userId: input.userId });
 
   await rememberBootUser(input);
+  if (input.sourceMessageId !== null && input.sourceMessageId !== undefined) {
+    const existingTurn = await findConversationTurnByTelegramMessage({
+      telegramUserId: userId,
+      telegramChatId: input.sourceChatId ?? null,
+      telegramMessageId: input.sourceMessageId
+    });
+    if (existingTurn) {
+      return duplicateTelegramTurnReply(existingTurn);
+    }
+  }
 
   const [recentMessages, cacheContextMemories] = await Promise.all([
     getRecentMessages(userId, 12),
@@ -376,7 +478,9 @@ export async function runBootConversation(input: BootConversationInput) {
     bootConfig,
     searchConfig,
     history,
-    toolDecision
+    toolDecision,
+    toolPermission: input.toolPermission ?? defaultToolPermission(input),
+    toolAudit: input.toolAudit ?? defaultBootToolAudit()
   });
   const responseMetadata: ConversationCacheMetadata = {
     memoryCount: memories.length,
@@ -397,12 +501,31 @@ export async function runBootConversation(input: BootConversationInput) {
           history
         });
 
-  const { userMessage, assistantMessage } = await saveConversationTurn({
-    telegramUserId: userId,
-    telegramMessageId: input.sourceMessageId ?? null,
-    userContent: input.content,
-    assistantContent: reply
-  });
+  let savedTurn: Awaited<ReturnType<typeof saveConversationTurn>>;
+  try {
+    savedTurn = await saveConversationTurn({
+      telegramUserId: userId,
+      telegramChatId: input.sourceChatId ?? null,
+      telegramMessageId: input.sourceMessageId ?? null,
+      userContent: input.content,
+      assistantContent: reply
+    });
+  } catch (error) {
+    if (input.sourceMessageId === null || input.sourceMessageId === undefined) {
+      throw error;
+    }
+    const existingTurn = await findConversationTurnByTelegramMessage({
+      telegramUserId: userId,
+      telegramChatId: input.sourceChatId ?? null,
+      telegramMessageId: input.sourceMessageId
+    });
+    if (!existingTurn) {
+      throw error;
+    }
+
+    return duplicateTelegramTurnReply(existingTurn);
+  }
+  const { userMessage, assistantMessage } = savedTurn;
 
   await scheduleDurableMemoryIfUseful({
     userId,
@@ -455,6 +578,8 @@ async function executeConversationTool(input: {
   searchConfig: ReturnType<typeof getBootSearchConfig>;
   history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
   toolDecision: BootToolDecision;
+  toolPermission: BootToolPermissionContext;
+  toolAudit: BootToolAuditHandler;
 }): Promise<{
   webSearch: ConversationWebSearchResult;
   toolStatus: BootToolStatus;
@@ -469,7 +594,11 @@ async function executeConversationTool(input: {
           query: input.toolDecision.query ?? input.input.content,
           maxResults: 4
         },
-        { searchConfig: input.searchConfig }
+        {
+          searchConfig: input.searchConfig,
+          permission: input.toolPermission,
+          audit: input.toolAudit
+        }
       );
       return {
         webSearch: { status: "completed", response, error: null },
@@ -497,6 +626,37 @@ async function executeConversationTool(input: {
   }
 
   if (input.toolDecision.action === "makoto_image") {
+    if (!toolAllowedByRuntimePolicy("makoto_image", input.toolPermission)) {
+      const message = "Tool makoto_image is not allowed by runtime policy.";
+      const auditEvent: BootToolAuditEvent = {
+        toolName: "makoto_image",
+        status: "denied",
+        durationMs: 0,
+        readOnly: false,
+        destructive: false,
+        concurrencySafe: true,
+        inputSummary: input.toolDecision.prompt ?? input.input.content,
+        error: message
+      };
+      if (input.toolPermission.actorId !== undefined) {
+        auditEvent.actorId = input.toolPermission.actorId;
+      }
+      if (input.toolPermission.chatId !== undefined) {
+        auditEvent.chatId = input.toolPermission.chatId;
+      }
+      await input.toolAudit(auditEvent);
+      return {
+        webSearch: { status: "skipped", response: null, error: null },
+        toolStatus: {
+          name: "makoto_image",
+          status: "failed",
+          message
+        },
+        images: [],
+        reply: `这一次画面没有顺利凝成：${message}`
+      };
+    }
+
     const originalPrompt = input.toolDecision.prompt ?? input.input.content;
     let imagePrompt = originalPrompt;
     let promptRewriteFallback = false;
@@ -526,7 +686,9 @@ async function executeConversationTool(input: {
               size: toolInput.size as `${number}x${number}`,
               n: toolInput.n,
               config: input.bootConfig
-            })
+            }),
+          permission: input.toolPermission,
+          audit: input.toolAudit
         }
       );
       return {
@@ -576,12 +738,31 @@ async function saveCachedReply(input: {
   cacheScope: string;
   embedding?: number[] | undefined;
 }) {
-  const { userMessage, assistantMessage } = await saveConversationTurn({
-    telegramUserId: input.userId,
-    telegramMessageId: input.input.sourceMessageId ?? null,
-    userContent: input.input.content,
-    assistantContent: input.hit.reply
-  });
+  let savedTurn: Awaited<ReturnType<typeof saveConversationTurn>>;
+  try {
+    savedTurn = await saveConversationTurn({
+      telegramUserId: input.userId,
+      telegramChatId: input.input.sourceChatId ?? null,
+      telegramMessageId: input.input.sourceMessageId ?? null,
+      userContent: input.input.content,
+      assistantContent: input.hit.reply
+    });
+  } catch (error) {
+    if (input.input.sourceMessageId === null || input.input.sourceMessageId === undefined) {
+      throw error;
+    }
+    const existingTurn = await findConversationTurnByTelegramMessage({
+      telegramUserId: input.userId,
+      telegramChatId: input.input.sourceChatId ?? null,
+      telegramMessageId: input.input.sourceMessageId
+    });
+    if (!existingTurn) {
+      throw error;
+    }
+
+    return duplicateTelegramTurnReply(existingTurn);
+  }
+  const { userMessage, assistantMessage } = savedTurn;
   if (input.hit.status === "l2_hit" || input.embedding) {
     refreshConversationCacheInBackground({
       identity: input.input,

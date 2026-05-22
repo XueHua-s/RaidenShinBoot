@@ -16,7 +16,7 @@ function canWriteConversations(user: AdminUserDto) {
 }
 
 function ChatConsole({ canWrite }: { canWrite: boolean }) {
-  const { t, formatStatus } = useI18n();
+  const { t, formatCacheStatus, formatStatus, formatToolAction, formatToolName } = useI18n();
   const [telegramUserId, setTelegramUserId] = useState("local-traveler");
   const [content, setContent] = useState("");
   const [result, setResult] = useState<ChatResponse | null>(null);
@@ -82,18 +82,18 @@ function ChatConsole({ canWrite }: { canWrite: boolean }) {
               <Badge tone="info">Raiden Makoto</Badge>
               <Badge>{t("chatConsole.memoryRecalled", { count: result.memoryCount })}</Badge>
               <Badge tone={result.toolStatus.status === "failed" ? "danger" : result.toolStatus.status === "completed" ? "success" : "warning"}>
-                {result.toolDecision.action} / {formatStatus(result.toolStatus.status)}
+                {formatToolAction(result.toolDecision.action)} / {formatStatus(result.toolStatus.status)}
               </Badge>
               <Badge tone={result.webSearchStatus === "completed" ? "success" : result.webSearchStatus === "failed" ? "danger" : "warning"}>
                 {t("chatConsole.searchUsed", { count: result.webSearchResultCount })}
               </Badge>
-              <Badge>{result.cacheStatus}</Badge>
+              <Badge>{formatCacheStatus(result.cacheStatus)}</Badge>
             </div>
             {result.toolStatus.message && <p className="mb-2 text-xs leading-5 text-zinc-600">{result.toolStatus.message}</p>}
             <dl className="mb-3 grid gap-2 rounded-md border border-cyan-100 bg-white/70 p-2 text-xs text-zinc-600 sm:grid-cols-2">
               <div>
                 <dt className="font-semibold text-zinc-800">{t("chatConsole.toolName")}</dt>
-                <dd className="mt-1 min-w-0 truncate">{result.toolStatus.name ?? "-"}</dd>
+                <dd className="mt-1 min-w-0 truncate">{formatToolName(result.toolStatus.name)}</dd>
               </div>
               <div>
                 <dt className="font-semibold text-zinc-800">{t("chatConsole.reason")}</dt>
@@ -135,7 +135,7 @@ function ChatConsole({ canWrite }: { canWrite: boolean }) {
 }
 
 function SearchDiagnosticsPanel({ canWrite }: { canWrite: boolean }) {
-  const { t } = useI18n();
+  const { t, formatSearchChannel, formatSearchResultProvider, formatSearchStatus } = useI18n();
   const [query, setQuery] = useState("雷电真 原神 设定");
   const [maxResults, setMaxResults] = useState(4);
   const [tools, setTools] = useState<BootToolDescriptor[]>([]);
@@ -223,10 +223,10 @@ function SearchDiagnosticsPanel({ canWrite }: { canWrite: boolean }) {
           <div className="mt-4 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={result.status === "completed" ? "success" : result.status === "partial" ? "warning" : "danger"}>
-                {result.status}
+                {formatSearchStatus(result.status)}
               </Badge>
-              <Badge>{result.provider}</Badge>
-              <Badge>{result.channels.join(", ") || "-"}</Badge>
+              <Badge>{formatSearchResultProvider(result.provider)}</Badge>
+              <Badge>{result.channels.map(formatSearchChannel).join(", ") || "-"}</Badge>
             </div>
             {result.failures.length > 0 && <p className="mt-2 text-xs leading-5 text-amber-700">{result.failures.join("；")}</p>}
             <div className="mt-3 grid gap-2">

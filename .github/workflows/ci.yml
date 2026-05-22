@@ -38,6 +38,8 @@ jobs:
       REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -50,7 +52,13 @@ jobs:
 
       - run: pnpm db:migrate
 
-      - run: pnpm run lint
+      - run: pnpm run lint:code
+
+      - if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+
+      - if: github.event_name == 'pull_request'
+        run: pnpm exec commitlint --from "${{ github.event.pull_request.base.sha }}" --to HEAD --verbose
 
       - run: pnpm run check
 

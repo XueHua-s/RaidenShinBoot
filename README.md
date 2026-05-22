@@ -28,7 +28,7 @@ pnpm dev:panel
 pnpm dev:bot
 ```
 
-启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。如果 chat 与 embedding 使用不同服务，分别配置 `BOOT_CHAT_API_KEY` 和 `BOOT_EMBEDDING_API_KEY`。
+启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。如果 chat 与 embedding 使用不同服务，分别配置 `BOOT_CHAT_API_KEY` 和 `BOOT_EMBEDDING_API_KEY`。如果需要通过 Telegram 隐藏命令切换全局聊天模型，把允许操作的 Telegram 用户 ID 写入 `BOT_ADMIN_TELEGRAM_IDS`。
 
 配置 `REDIS_URL` 后会启用 BullMQ 队列、Telegram webhook 入队、L1/L2 语义响应缓存。没有 Redis 时，本地 polling 仍可工作，长期记忆会回退到原来的 inline 创建路径；webhook 入队会在 `BOOT_QUEUE_ENQUEUE_TIMEOUT_MS` 后稳定返回 503。
 
@@ -151,14 +151,14 @@ boot 客户端支持按能力拆分 OpenAI-compatible provider：
 
 | 能力 | Base URL | API key | 模型 | 说明 |
 | --- | --- | --- | --- | --- |
-| Chat | `BOOT_CHAT_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` 或 `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | 默认对话模型为 `gpt-5.5`；可在后台或 Telegram 隐藏命令 `/model` 切换。 |
+| Chat | `BOOT_CHAT_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` 或 `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | 默认对话模型为 `gpt-5.5`；可在后台切换，Telegram 隐藏命令 `/model` 仅允许配置的 bot 管理员切换。 |
 | Embedding | `BOOT_EMBEDDING_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` 或 `BOOT_API_KEY` | 固定 `text-embedding-3-large` | 必须返回 3072 维，因为长期记忆存储为 `halfvec(3072)`。 |
 | Image | `BOOT_IMAGE_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` 或 `BOOT_API_KEY` | 固定 `chatgpt-image-latest` | 用于 `POST /api/images`、Telegram `/draw` 和自然语言自主生图，返回 base64 图片。 |
 | Web search | `BOOT_SEARCH_BASE_URL` 或 provider 默认地址 | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | 支持 `tavily`、`brave`、`serper`，默认 `disabled`。 |
 
 管理后台 System 页可以把这些值保存到 PostgreSQL `runtime_settings`。runtime settings 优先于 `.env`，会记录 audit，并会被 Hono API 和 grammY bot 在下一次请求中读取。secret 字段为 write-only；设置 `BOOT_SETTINGS_ENCRYPTION_KEY` 后会使用 AES-256-GCM 加密存储。嵌入模型和生图模型在运行时强制固定，后台只展示只读状态。
 
-使用 `new-api` 时，在 System 页选择 `new-api` preset，并把 `BOOT_BASE_URL` 指向 gateway 的 OpenAI-compatible `/v1` endpoint，例如 `https://new-api.example.com/v1`。对话模型列表来自 provider `/models`；`/model <model_id>` 会先校验模型存在并做一次轻量 chat probe，成功后才在同一事务内写入运行时配置和审计日志。
+使用 `new-api` 时，在 System 页选择 `new-api` preset，并把 `BOOT_BASE_URL` 指向 gateway 的 OpenAI-compatible `/v1` endpoint，例如 `https://new-api.example.com/v1`。对话模型列表来自 provider `/models`；后台保存 `BOOT_CHAT_MODEL` 或 Telegram 管理员执行 `/model <model_id>` 时，都会先校验模型存在并做一次轻量 chat probe，成功后才写入运行时配置和审计日志。
 
 已验证的分离配置：
 
@@ -218,7 +218,7 @@ BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
 
 - `/model`：查看当前对话模型
 - `/model list`：查看 provider `/models` 返回的可用模型
-- `/model <model_id>`：切换全局对话模型；所有已获准聊天的用户都可以使用，会写入审计日志。该命令不会注册到 Telegram 命令菜单，也不会被后台命令权限规则禁用。
+- `/model <model_id>`：切换全局对话模型；只有 `BOT_ADMIN_TELEGRAM_IDS` 中的 Telegram 用户可以使用，会写入审计日志。该命令不会注册到 Telegram 命令菜单，也不会被后台命令权限规则管理。
 
 不再公开 `/memory`、`/recall`、`/search`、`/status`。长期记忆浏览、语义召回、运行状态、模型和工具配置都在 Web 管理后台处理。普通聊天不需要 `/start`；机器人会在对话中自主决定是否调用搜索或绘图工具。
 

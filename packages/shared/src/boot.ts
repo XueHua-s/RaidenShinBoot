@@ -67,6 +67,15 @@ export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig 
   };
 }
 
+function withMaxChatTimeout(config: BootConfig, maxTimeoutMs: number): BootConfig {
+  return config.BOOT_CHAT_TIMEOUT_MS > maxTimeoutMs
+    ? {
+        ...config,
+        BOOT_CHAT_TIMEOUT_MS: maxTimeoutMs
+      }
+    : config;
+}
+
 function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" | "image") {
   if (value) {
     return value;
@@ -492,7 +501,7 @@ export async function planMakotoToolUse(input: {
   history?: ChatHistoryItem[];
   config?: BootConfig;
 }): Promise<BootToolDecision> {
-  const config = input.config ?? getBootConfig();
+  const config = withMaxChatTimeout(input.config ?? getBootConfig(), 15_000);
   try {
     const historyText = (input.history ?? [])
       .slice(-6)
@@ -547,7 +556,7 @@ export async function generateMakotoImagePrompt(input: {
   history?: ChatHistoryItem[];
   config?: BootConfig;
 }) {
-  const config = input.config ?? getBootConfig();
+  const config = withMaxChatTimeout(input.config ?? getBootConfig(), 20_000);
   const historyText = (input.history ?? [])
     .slice(-6)
     .map((item) => `${item.role}: ${item.content}`)
@@ -602,6 +611,15 @@ function parseToolDecision(text: string): BootToolDecision {
 
 function normalizeToolDecision(decision: BootToolDecision, content: string): BootToolDecision {
   if (decision.action === "web_search") {
+    if (!shouldUseBootSearchForMessage(content)) {
+      return {
+        action: "none",
+        reason: "工具规划建议搜索，但用户没有明确搜索或知识检索意图。",
+        query: null,
+        prompt: null
+      };
+    }
+
     return {
       ...decision,
       query: decision.query?.trim() || content.slice(0, 500),
@@ -610,6 +628,15 @@ function normalizeToolDecision(decision: BootToolDecision, content: string): Boo
   }
 
   if (decision.action === "makoto_image") {
+    if (!shouldUseExplicitMakotoImageForMessage(content)) {
+      return {
+        action: "none",
+        reason: "工具规划建议生图，但用户没有明确图片生成意图。",
+        query: null,
+        prompt: null
+      };
+    }
+
     return {
       ...decision,
       query: null,
@@ -662,16 +689,14 @@ function deterministicToolDecisionFallback(
   return null;
 }
 
-function shouldUseExplicitMakotoImageForMessage(content: string) {
+export function shouldUseExplicitMakotoImageForMessage(content: string) {
   return /(画图|生图|出图|绘制|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw\s+(an?\s+)?image|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
     content
   );
 }
 
 function shouldUseMakotoImageForMessage(content: string) {
-  return /(画|绘制|画图|生图|出图|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
-    content
-  );
+  return shouldUseExplicitMakotoImageForMessage(content);
 }
 
 function shouldUseExplicitBootSearchForMessage(content: string) {

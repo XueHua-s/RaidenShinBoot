@@ -29,6 +29,7 @@ import { hashPassword } from "@raiden/server/auth";
 import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
 import { planMakotoToolUse } from "@raiden/shared/boot";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
+import { isTelegramBotAdminId } from "../packages/bot/src/bot.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
 
@@ -142,6 +143,9 @@ async function main() {
   if (isStandaloneCacheCandidate("继续说刚才那件事")) {
     throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
   }
+  if (isStandaloneCacheCandidate("请生成一张稻妻樱花头像")) {
+    throw new Error("Explicit image-generation prompts must not be semantic-cache candidates");
+  }
   for (const memoryMutationPrompt of ["请记住我喜欢苹果", "我的名字是小雪", "I like dango milk, please remember that"]) {
     if (isStandaloneCacheCandidate(memoryMutationPrompt)) {
       throw new Error(`Memory/profile mutation prompt should not be a semantic-cache candidate: ${memoryMutationPrompt}`);
@@ -172,7 +176,7 @@ async function main() {
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
-    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from admin_users where username = ${adminUsername}`;
 
     await createAdminUser({
@@ -458,12 +462,50 @@ async function main() {
           username: "e2e_bot_user",
           language_code: "zh"
         },
+        chat: { id: -1009876543210, type: "supergroup" },
         message: { message_id: 42 }
       } as never,
       "我是 bot 路径里的小雪，也喜欢团子牛奶。请记住。"
     );
     if (!firstBotResult.reply) {
       throw new Error("First bot conversation core returned an empty reply");
+    }
+    const duplicateBotResult = await replyAsMakoto(
+      {
+        from: {
+          id: botUserNumericId,
+          is_bot: false,
+          first_name: "E2E",
+          username: "e2e_bot_user",
+          language_code: "zh"
+        },
+        chat: { id: -1009876543210, type: "supergroup" },
+        message: { message_id: 42 }
+      } as never,
+      "我是 bot 路径里的小雪，也喜欢团子牛奶。请记住。"
+    );
+    if (
+      duplicateBotResult.userMessageId !== firstBotResult.userMessageId ||
+      duplicateBotResult.assistantMessageId !== firstBotResult.assistantMessageId
+    ) {
+      throw new Error("Duplicate Telegram message_id should reuse the saved conversation turn");
+    }
+    const differentChatSameTelegramMessageId = await replyAsMakoto(
+      {
+        from: {
+          id: botUserNumericId,
+          is_bot: false,
+          first_name: "E2E",
+          username: "e2e_bot_user",
+          language_code: "zh"
+        },
+        chat: { id: -1009876543211, type: "supergroup" },
+        message: { message_id: 42 }
+      } as never,
+      "同一个 Telegram message_id 但来自不同 chat，应该保存为独立轮次。"
+    );
+    if (differentChatSameTelegramMessageId.userMessageId === firstBotResult.userMessageId) {
+      throw new Error("Same Telegram message_id from a different chat must not reuse the first chat's turn");
     }
 
     const botMemories = await listMemories({ telegramUserId: botTelegramUserId, limit: 5, offset: 0 });
@@ -480,6 +522,7 @@ async function main() {
           username: "e2e_bot_user",
           language_code: "zh"
         },
+        chat: { id: -1009876543210, type: "supergroup" },
         message: { message_id: 43 }
       } as never,
       "你对我有什么印象？"
@@ -542,16 +585,34 @@ async function main() {
     if (modelCommandRuleResponse.status !== 400) {
       throw new Error(`Reserved /model command permission should be rejected, got ${modelCommandRuleResponse.status}`);
     }
-    await upsertTelegramCommandPermission({ chatId: null, command: "model", enabled: false });
-    const modelBypassAccess = await resolveTelegramChatAccess({
+    const repositoryRejectedModelCommand = await (async () => {
+      try {
+        await upsertTelegramCommandPermission({ chatId: null, command: "model", enabled: false });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!repositoryRejectedModelCommand) {
+      throw new Error("Repository should reject reserved /model command permission writes");
+    }
+    const modelCommandAccess = await resolveTelegramChatAccess({
       chatId: "-1001234567890",
       type: "supergroup",
       title: "E2E Pending Group",
-      command: "model",
-      ignoreCommandPermission: true
+      command: "model"
     });
-    if (!modelBypassAccess.allowed) {
-      throw new Error("Hidden /model command should bypass command permission rules for approved chats");
+    if (!modelCommandAccess.allowed) {
+      throw new Error("Hidden /model command should remain readable for approved chats when no permission rule exists");
+    }
+    const originalBotAdminTelegramIds = process.env.BOT_ADMIN_TELEGRAM_IDS;
+    process.env.BOT_ADMIN_TELEGRAM_IDS = `${botUserNumericId}, 123456`;
+    try {
+      if (!isTelegramBotAdminId(botUserNumericId) || isTelegramBotAdminId(botUserNumericId + 1)) {
+        throw new Error("BOT_ADMIN_TELEGRAM_IDS should gate Telegram model switching by exact Telegram user id");
+      }
+    } finally {
+      restoreEnv("BOT_ADMIN_TELEGRAM_IDS", originalBotAdminTelegramIds);
     }
     const scopedPermission = (await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true })) as {
       data: { id: string };
@@ -875,6 +936,9 @@ async function main() {
           apiFirstMemoryCount: firstPayload.memoryCount,
           apiRecallMemoryCount: secondPayload.memoryCount,
           botRecallMemoryCount: secondBotResult.memoryCount,
+          duplicateTelegramMessageReusedTurn: duplicateBotResult.userMessageId === firstBotResult.userMessageId,
+          sameMessageIdDifferentChatSavedSeparately:
+            differentChatSameTelegramMessageId.userMessageId !== firstBotResult.userMessageId,
           apiRecallReplyPreview: secondPayload.reply.slice(0, 80),
           botRecallReplyPreview: secondBotResult.reply.slice(0, 80),
           apiMemoryCount: apiMemories.length,
@@ -898,7 +962,7 @@ async function main() {
           approvedGroupAllowed: approvedGroupAccess.allowed,
           globalCommandBlocked: !globallyBlockedCommandAccess.allowed,
           scopedCommandOverrideAllowed: scopedCommandOverrideAccess.allowed,
-          modelCommandBypassAllowed: modelBypassAccess.allowed,
+          modelCommandReadableForApprovedChat: modelCommandAccess.allowed,
           scopedCommandResetBlocked: !resetScopedCommandAccess.allowed,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
@@ -908,7 +972,7 @@ async function main() {
     );
   } finally {
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
-    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));

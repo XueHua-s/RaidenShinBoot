@@ -1,8 +1,6 @@
 import type { Context, MiddlewareFn } from "grammy";
 import { resolveTelegramChatAccess, upsertTelegramChatMember, upsertTelegramUser } from "@raiden/database";
 
-const commandPermissionBypass = new Set(["model"]);
-
 function textCommand(ctx: Context) {
   const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
   const match = text?.trim().match(/^\/([a-zA-Z0-9_]+)/);
@@ -46,8 +44,7 @@ export const enforceTelegramAccess: MiddlewareFn<Context> = async (ctx, next) =>
   const accessInput: Parameters<typeof resolveTelegramChatAccess>[0] = {
     chatId: String(ctx.chat.id),
     type: ctx.chat.type,
-    command,
-    ignoreCommandPermission: command ? commandPermissionBypass.has(command) : false
+    command
   };
   const title = chatTitle(ctx);
   const username = chatUsername(ctx);

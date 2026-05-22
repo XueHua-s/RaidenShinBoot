@@ -5,12 +5,13 @@ import { requirePermission, type AuthVariables } from "../auth.js";
 import { handleConversation } from "../services/conversation.js";
 
 export const chatRoute = new Hono<{ Variables: AuthVariables }>().post("/", zValidator("json", chatRequestSchema), async (c) => {
-  requirePermission(c, "conversation:write");
+  const admin = requirePermission(c, "conversation:write");
   const body = c.req.valid("json");
   const result = await handleConversation({
     telegramUserId: body.telegramUserId,
     username: body.username ?? null,
-    content: body.content
+    content: body.content,
+    actorId: admin.id
   });
 
   return c.json({

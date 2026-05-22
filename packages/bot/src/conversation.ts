@@ -39,7 +39,12 @@ export async function replyAsMakoto(ctx: Context, content: string) {
   return runBootConversation({
     ...telegramIdentity(ctx),
     content,
-    sourceMessageId: ctx.message?.message_id ?? null
+    sourceChatId: ctx.chat?.id === undefined ? null : String(ctx.chat.id),
+    sourceMessageId: ctx.message?.message_id ?? null,
+    toolPermission: {
+      actorId: String(ctx.from?.id),
+      chatId: ctx.chat?.id === undefined ? null : String(ctx.chat.id)
+    }
   });
 }
 

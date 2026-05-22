@@ -34,6 +34,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
   const [commandChatId, setCommandChatId] = useState("");
   const [commandName, setCommandName] = useState("start");
   const [commandEnabled, setCommandEnabled] = useState(true);
+  const [deletingPermissionId, setDeletingPermissionId] = useState<string | null>(null);
   const canModerate = canModerateTelegram(user);
 
   async function updateChat(chatId: string, patch: Partial<Pick<TelegramChatDto, "status" | "policy">>) {
@@ -85,8 +86,12 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
     if (!canModerate) {
       return;
     }
+    if (!window.confirm(t("telegram.deleteRuleConfirm"))) {
+      return;
+    }
 
     setCommandMutationError(null);
+    setDeletingPermissionId(permission.id);
     try {
       const response = await apiClient.api.telegram["command-permissions"][":id"].$delete({
         param: { id: permission.id }
@@ -95,6 +100,8 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
       await commandPermissions.reload();
     } catch (requestError) {
       setCommandMutationError(errorMessage(requestError));
+    } finally {
+      setDeletingPermissionId(null);
     }
   }
 
@@ -271,7 +278,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                       <div className="flex justify-end">
                         <Button
                           aria-label={t("common.delete")}
-                          disabled={!canModerate}
+                          disabled={!canModerate || deletingPermissionId === permission.id}
                           onClick={() => deleteCommandPermission(permission)}
                           size="icon"
                           title={t("common.delete")}

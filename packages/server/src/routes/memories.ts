@@ -41,7 +41,8 @@ export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
     const rows = await searchMemories({
       telegramUserId: body.telegramUserId,
       embedding,
-      limit: body.limit
+      limit: body.limit,
+      touchLastAccessed: false
     });
 
     return c.json({

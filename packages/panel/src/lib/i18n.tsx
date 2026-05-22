@@ -142,6 +142,7 @@ const zh = {
   "telegram.saveRule": "保存规则",
   "telegram.commandPermissionEmpty": "暂无命令权限规则。",
   "telegram.commandInvalid": "命令只能包含小写字母、数字、下划线，且 /model 是隐藏保留命令。",
+  "telegram.deleteRuleConfirm": "确认删除这条命令权限规则？",
   "chatConsole.title": "安全聊天测试台",
   "chatConsole.description": "使用受保护 API 路由测试对话、长期记忆和搜索降级。",
   "chatConsole.telegramId": "用户 ID",
@@ -157,6 +158,31 @@ const zh = {
   "chatConsole.query": "查询",
   "chatConsole.prompt": "提示词",
   "chatConsole.cacheSimilarity": "缓存相似度",
+  "toolAction.none": "不调用工具",
+  "toolAction.web_search": "联网搜索",
+  "toolAction.makoto_image": "生成图片",
+  "toolName.web_search": "联网搜索",
+  "toolName.google_search": "Google 搜索",
+  "toolName.wikipedia_search": "维基百科",
+  "toolName.moegirl_search": "萌娘百科",
+  "toolName.makoto_image": "生成图片",
+  "cacheStatus.disabled": "缓存关闭",
+  "cacheStatus.miss": "缓存未命中",
+  "cacheStatus.l1_hit": "精确缓存命中",
+  "cacheStatus.l2_hit": "语义缓存命中",
+  "searchStatus.completed": "已完成",
+  "searchStatus.partial": "部分完成",
+  "searchStatus.failed": "失败",
+  "searchProvider.router": "路由搜索",
+  "searchProvider.google": "Google 搜索",
+  "searchProvider.wikipedia": "维基百科",
+  "searchProvider.moegirl": "萌娘百科",
+  "searchProvider.tavily": "Tavily",
+  "searchProvider.brave": "Brave",
+  "searchProvider.serper": "Serper",
+  "searchChannel.google": "Google",
+  "searchChannel.wikipedia": "维基百科",
+  "searchChannel.moegirl": "萌娘百科",
   "searchDiagnostics.title": "搜索诊断",
   "searchDiagnostics.description": "验证后台搜索路由、工具注册表、渠道、失败信息和结果。",
   "searchDiagnostics.query": "搜索内容",
@@ -393,6 +419,7 @@ const en: Record<keyof typeof zh, string> = {
   "telegram.saveRule": "Save rule",
   "telegram.commandPermissionEmpty": "No command permission rules yet.",
   "telegram.commandInvalid": "Commands can only use lowercase letters, numbers, and underscores. /model is hidden and reserved.",
+  "telegram.deleteRuleConfirm": "Delete this command permission rule?",
   "chatConsole.title": "Safe Chat Console",
   "chatConsole.description": "Test conversation, long-term memory, and search fallback through protected API routes.",
   "chatConsole.telegramId": "Telegram ID",
@@ -408,6 +435,31 @@ const en: Record<keyof typeof zh, string> = {
   "chatConsole.query": "Query",
   "chatConsole.prompt": "Prompt",
   "chatConsole.cacheSimilarity": "Cache similarity",
+  "toolAction.none": "No tool",
+  "toolAction.web_search": "Web search",
+  "toolAction.makoto_image": "Image generation",
+  "toolName.web_search": "Web search",
+  "toolName.google_search": "Google search",
+  "toolName.wikipedia_search": "Wikipedia",
+  "toolName.moegirl_search": "Moegirl",
+  "toolName.makoto_image": "Image generation",
+  "cacheStatus.disabled": "Cache disabled",
+  "cacheStatus.miss": "Cache miss",
+  "cacheStatus.l1_hit": "Exact cache hit",
+  "cacheStatus.l2_hit": "Semantic cache hit",
+  "searchStatus.completed": "Completed",
+  "searchStatus.partial": "Partial",
+  "searchStatus.failed": "Failed",
+  "searchProvider.router": "Routed search",
+  "searchProvider.google": "Google search",
+  "searchProvider.wikipedia": "Wikipedia",
+  "searchProvider.moegirl": "Moegirl",
+  "searchProvider.tavily": "Tavily",
+  "searchProvider.brave": "Brave",
+  "searchProvider.serper": "Serper",
+  "searchChannel.google": "Google",
+  "searchChannel.wikipedia": "Wikipedia",
+  "searchChannel.moegirl": "Moegirl",
   "searchDiagnostics.title": "Search Diagnostics",
   "searchDiagnostics.description": "Validate search routing, tool registry, channels, failures, and results.",
   "searchDiagnostics.query": "Search query",
@@ -526,6 +578,12 @@ export type I18nContextValue = {
   formatChatType: (value: string | null | undefined) => string;
   formatMessageRole: (value: string | null | undefined) => string;
   formatSearchProvider: (value: string | null | undefined) => string;
+  formatSearchResultProvider: (value: string | null | undefined) => string;
+  formatSearchStatus: (value: string | null | undefined) => string;
+  formatSearchChannel: (value: string | null | undefined) => string;
+  formatToolAction: (value: string | null | undefined) => string;
+  formatToolName: (value: string | null | undefined) => string;
+  formatCacheStatus: (value: string | null | undefined) => string;
   formatDepth: (value: string | null | undefined) => string;
   formatDate: (value: string | null | undefined) => string;
 };
@@ -556,6 +614,23 @@ function rawOrMapped(t: I18nContextValue["t"], prefix: string, value: string | n
   return key in zh ? t(key) : value;
 }
 
+function formatSearchResultProvider(t: I18nContextValue["t"], value: string | null | undefined) {
+  if (!value) {
+    return "-";
+  }
+
+  const [provider, detail] = value.split(":", 2);
+  const label = rawOrMapped(t, "searchProvider", provider);
+  if (!detail) {
+    return label;
+  }
+
+  return `${label} (${detail
+    .split(",")
+    .map((item) => rawOrMapped(t, "searchChannel", item.trim()))
+    .join(", ")})`;
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [storedLocale, setStoredLocale] = useLocalStorage<Locale>(localeStorageKey, "zh", { raw: true });
   const locale = normalizeLocale(storedLocale);
@@ -579,6 +654,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       formatChatType: (raw) => rawOrMapped(t, "chatType", raw),
       formatMessageRole: (raw) => rawOrMapped(t, "messageRole", raw),
       formatSearchProvider: (raw) => (raw === "disabled" ? t("provider.disabled") : raw ?? "-"),
+      formatSearchResultProvider: (raw) => formatSearchResultProvider(t, raw),
+      formatSearchStatus: (raw) => rawOrMapped(t, "searchStatus", raw),
+      formatSearchChannel: (raw) => rawOrMapped(t, "searchChannel", raw),
+      formatToolAction: (raw) => rawOrMapped(t, "toolAction", raw),
+      formatToolName: (raw) => rawOrMapped(t, "toolName", raw),
+      formatCacheStatus: (raw) => rawOrMapped(t, "cacheStatus", raw),
       formatDepth: (raw) => rawOrMapped(t, "depth", raw),
       formatDate: (raw) => (raw ? dayjs(raw).locale(dateLocale).format(dateFormat) : "-")
     };

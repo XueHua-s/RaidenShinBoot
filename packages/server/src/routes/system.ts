@@ -1,19 +1,26 @@
 import {
-  applyRuntimeSettingsChanges,
+  applyRuntimeSettingsChangesWithAudit,
   encryptRuntimeSettingValue,
   getRuntimeSettingsEnvOverrides,
   isRuntimeSettingsSecretStorageReady,
   listRuntimeSettings,
   type NewRuntimeSetting
 } from "@raiden/database";
-import { updateRuntimeSettingsRequestSchema, type RuntimeSettings } from "@raiden/shared";
-import { fixedBootEmbeddingModel, fixedBootImageModel, getBootConfig, isLikelyChatModelId } from "@raiden/shared/boot";
+import { updateRuntimeSettingsRequestSchema, type RuntimeSettings, type UpdateRuntimeSettingsRequest } from "@raiden/shared";
+import {
+  fixedBootEmbeddingModel,
+  fixedBootImageModel,
+  getBootConfig,
+  isLikelyChatModelId,
+  listChatModels,
+  probeChatModel
+} from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import { zValidator } from "@hono/zod-validator";
 import { listEffectiveChatModels, loadRuntimeEnv } from "@raiden/boot";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission, type AuthVariables, writeAuditFromContext } from "../auth.js";
+import { auditRequestMeta, requirePermission, type AuthVariables } from "../auth.js";
 
 const defaultBootBaseUrl = "https://proxy.xhblog.top:3000/v1";
 const defaultWikipediaApiUrl = "https://zh.wikipedia.org/w/api.php";
@@ -215,6 +222,87 @@ function secretSettingChange(key: string, value: string | null, updatedByAdminId
   };
 }
 
+function applyRuntimeSettingsRequestToEnv(env: NodeJS.ProcessEnv, body: UpdateRuntimeSettingsRequest): NodeJS.ProcessEnv {
+  const candidate = { ...env };
+
+  for (const [field, key] of Object.entries(publicSettingFields) as Array<
+    [keyof typeof publicSettingFields, (typeof publicSettingFields)[keyof typeof publicSettingFields]]
+  >) {
+    if (!(field in body)) {
+      continue;
+    }
+
+    const value = body[field as keyof typeof body];
+    if (value === null) {
+      if (process.env[key]?.trim()) {
+        candidate[key] = process.env[key];
+      } else {
+        delete candidate[key];
+      }
+    } else if (value !== undefined) {
+      candidate[key] = String(value);
+    }
+  }
+
+  for (const [field, key] of Object.entries(secretSettingFields) as Array<
+    [keyof typeof secretSettingFields, (typeof secretSettingFields)[keyof typeof secretSettingFields]]
+  >) {
+    if (!(field in body)) {
+      continue;
+    }
+
+    const value = body[field as keyof typeof body];
+    if (value === null) {
+      if (process.env[key]?.trim()) {
+        candidate[key] = process.env[key];
+      } else {
+        delete candidate[key];
+      }
+    } else if (typeof value === "string") {
+      candidate[key] = value;
+    }
+  }
+
+  return candidate;
+}
+
+async function validateRuntimeChatModelPatch(body: UpdateRuntimeSettingsRequest) {
+  const chatProviderTouched =
+    "bootChatModel" in body ||
+    "gatewayPreset" in body ||
+    "bootBaseUrl" in body ||
+    "bootChatBaseUrl" in body ||
+    "bootApiKey" in body ||
+    "bootChatApiKey" in body;
+  if (!chatProviderTouched) {
+    return;
+  }
+
+  const candidateConfig = getBootConfig(applyRuntimeSettingsRequestToEnv(await loadRuntimeEnv(), body));
+  const modelId = candidateConfig.BOOT_CHAT_MODEL;
+  if (!isLikelyChatModelId(modelId)) {
+    throw new HTTPException(400, {
+      message: "BOOT_CHAT_MODEL must be a chat-capable model. Fixed embedding/image models cannot be used as the chat model."
+    });
+  }
+
+  const modelList = await listChatModels(candidateConfig);
+  const exists = modelList.models.some((model) => model.id === modelId);
+  if (!exists) {
+    throw new HTTPException(400, {
+      message: `BOOT_CHAT_MODEL "${modelId}" was not found in the provider model list.`
+    });
+  }
+
+  try {
+    await probeChatModel(modelId, candidateConfig);
+  } catch (error) {
+    throw new HTTPException(400, {
+      message: `BOOT_CHAT_MODEL "${modelId}" failed the chat probe: ${error instanceof Error ? error.message : "unknown error"}`
+    });
+  }
+}
+
 export const systemRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/status", async (c) => {
     requirePermission(c, "system:read");
@@ -231,11 +319,7 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
   .patch("/settings", zValidator("json", updateRuntimeSettingsRequestSchema), async (c) => {
     const admin = requirePermission(c, "system:write");
     const body = c.req.valid("json");
-    if (body.bootChatModel && !isLikelyChatModelId(body.bootChatModel)) {
-      throw new HTTPException(400, {
-        message: "BOOT_CHAT_MODEL must be a chat-capable model. Fixed embedding/image models cannot be used as the chat model."
-      });
-    }
+    await validateRuntimeChatModelPatch(body);
     const before = await buildRuntimeSettingsPayload();
     const deletes: string[] = [];
     const upserts: NewRuntimeSetting[] = [];
@@ -275,15 +359,24 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
       }
     }
 
-    await applyRuntimeSettingsChanges({ deletes, upserts });
+    const changedKeys = [...deletes, ...upserts.map((setting) => setting.key)];
+    await applyRuntimeSettingsChangesWithAudit({
+      changes: { deletes, upserts },
+      audit: {
+        actorAdminId: admin.id,
+        action: "runtime_settings.update",
+        targetType: "runtime_settings",
+        before,
+        after: {
+          changedKeys,
+          deletedKeys: deletes,
+          upsertedKeys: upserts.map((setting) => setting.key)
+        },
+        ...auditRequestMeta(c)
+      }
+    });
 
     const after = await buildRuntimeSettingsPayload();
-    await writeAuditFromContext(c, {
-      action: "runtime_settings.update",
-      targetType: "runtime_settings",
-      before,
-      after
-    });
 
     return c.json({ data: after });
   });

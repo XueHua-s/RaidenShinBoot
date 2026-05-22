@@ -149,6 +149,7 @@ export const upsertTelegramCommandPermissionRequestSchema = z.object({
 export const messageSchema = z.object({
   id: z.string(),
   telegramUserId: z.string(),
+  telegramChatId: z.string().nullable().optional(),
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
   createdAt: z.string()
