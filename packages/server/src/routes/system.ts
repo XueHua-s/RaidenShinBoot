@@ -8,8 +8,6 @@ import {
 } from "@raiden/database";
 import { updateRuntimeSettingsRequestSchema, type RuntimeSettings, type UpdateRuntimeSettingsRequest } from "@raiden/shared";
 import {
-  fixedBootEmbeddingModel,
-  fixedBootImageModel,
   getBootConfig,
   isLikelyChatModelId,
   listChatModels,
@@ -21,10 +19,6 @@ import { listEffectiveChatModels, loadRuntimeEnv } from "@raiden/boot";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { auditRequestMeta, requirePermission, type AuthVariables } from "../auth.js";
-
-const defaultBootBaseUrl = "https://proxy.xhblog.top:3000/v1";
-const defaultWikipediaApiUrl = "https://zh.wikipedia.org/w/api.php";
-const defaultMoegirlApiUrl = "https://zh.moegirl.org.cn/api.php";
 
 const publicSettingFields = {
   gatewayPreset: "BOOT_GATEWAY_PRESET",
@@ -125,30 +119,7 @@ async function buildRuntimeSettingsPayload(): Promise<RuntimeSettings> {
 export function healthStatusPayload() {
   return {
     ok: true,
-    service: "raiden-shin-server",
-    databaseConfigured: Boolean(process.env.DATABASE_URL),
-    bootBaseUrl: process.env.BOOT_BASE_URL ?? defaultBootBaseUrl,
-    bootChatBaseUrl: process.env.BOOT_CHAT_BASE_URL || process.env.BOOT_BASE_URL || null,
-    bootEmbeddingBaseUrl: process.env.BOOT_EMBEDDING_BASE_URL || process.env.BOOT_BASE_URL || null,
-    bootImageBaseUrl: process.env.BOOT_IMAGE_BASE_URL || process.env.BOOT_BASE_URL || null,
-    bootSearchBaseUrl: process.env.BOOT_SEARCH_BASE_URL || null,
-    bootWikipediaApiUrl: process.env.BOOT_WIKIPEDIA_API_URL ?? defaultWikipediaApiUrl,
-    bootMoegirlApiUrl: process.env.BOOT_MOEGIRL_API_URL ?? defaultMoegirlApiUrl,
-    bootChatModel: process.env.BOOT_CHAT_MODEL ?? "gpt-5.5",
-    bootEmbeddingModel: fixedBootEmbeddingModel,
-    bootImageModel: fixedBootImageModel,
-    bootSearchProvider: process.env.BOOT_SEARCH_PROVIDER ?? "disabled",
-    bootSearchMaxResults: Number(process.env.BOOT_SEARCH_MAX_RESULTS ?? "5"),
-    bootSearchDepth: process.env.BOOT_SEARCH_DEPTH ?? "basic",
-    bootApiKeyConfigured: Boolean(process.env.BOOT_API_KEY),
-    bootChatApiKeyConfigured: Boolean(process.env.BOOT_CHAT_API_KEY),
-    bootEmbeddingApiKeyConfigured: Boolean(process.env.BOOT_EMBEDDING_API_KEY),
-    bootImageApiKeyConfigured: Boolean(process.env.BOOT_IMAGE_API_KEY),
-    bootSearchApiKeyConfigured: Boolean(process.env.BOOT_SEARCH_API_KEY),
-    runtimeSettingsConfigured: false,
-    runtimeSettingsSecretStorageReady: isRuntimeSettingsSecretStorageReady(),
-    authEnabled: true,
-    botTokenConfigured: Boolean(process.env.BOT_TOKEN)
+    service: "raiden-shin-server"
   };
 }
 

@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, notInArray, or, sql } from "drizzle-orm";
 import { getDatabase } from "./client.js";
 import {
   adminSessions,
@@ -65,6 +65,7 @@ const defaultPagination = {
   offset: 0
 };
 const reservedTelegramCommandNames = new Set(["model"]);
+const hiddenTelegramCommandNames = [...reservedTelegramCommandNames, "/model"];
 
 const encryptedValuePrefix = "aes-256-gcm:v1";
 
@@ -678,7 +679,7 @@ export async function listTelegramCommandPermissions(
     .where(
       and(
         input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
-        ne(telegramCommandPermissions.command, "model")
+        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
       )
     )
     .orderBy(desc(telegramCommandPermissions.updatedAt))
@@ -696,15 +697,20 @@ export async function countTelegramCommandPermissions(input: { chatId?: string |
     .where(
       and(
         input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
-        ne(telegramCommandPermissions.command, "model")
+        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
       )
     );
 
   return row?.count ?? 0;
 }
 
+function normalizeTelegramCommandName(command: string) {
+  return command.trim().replace(/^\//, "").toLowerCase();
+}
+
 function assertManageableTelegramCommand(command: string) {
-  if (reservedTelegramCommandNames.has(command.trim().toLowerCase())) {
+  const normalizedCommand = normalizeTelegramCommandName(command);
+  if (reservedTelegramCommandNames.has(normalizedCommand)) {
     throw new Error("/model is hidden and cannot be managed by command permission rules.");
   }
 }
@@ -712,15 +718,19 @@ function assertManageableTelegramCommand(command: string) {
 export async function upsertTelegramCommandPermission(input: NewTelegramCommandPermission) {
   assertManageableTelegramCommand(input.command);
   const db = getDatabase();
+  const values = {
+    ...input,
+    command: normalizeTelegramCommandName(input.command)
+  };
   const rowUpdate = {
-    enabled: input.enabled,
+    enabled: values.enabled,
     updatedAt: new Date()
   };
-  const isGlobalRule = input.chatId === null || input.chatId === undefined;
+  const isGlobalRule = values.chatId === null || values.chatId === undefined;
   const [row] = isGlobalRule
     ? await db
         .insert(telegramCommandPermissions)
-        .values(input)
+        .values(values)
         .onConflictDoUpdate({
           target: telegramCommandPermissions.command,
           targetWhere: sql`${telegramCommandPermissions.chatId} is null`,
@@ -729,7 +739,7 @@ export async function upsertTelegramCommandPermission(input: NewTelegramCommandP
         .returning()
     : await db
         .insert(telegramCommandPermissions)
-        .values(input)
+        .values(values)
         .onConflictDoUpdate({
           target: [telegramCommandPermissions.chatId, telegramCommandPermissions.command],
           targetWhere: sql`${telegramCommandPermissions.chatId} is not null`,
@@ -767,7 +777,7 @@ export async function resolveTelegramChatAccess(input: {
   });
 
   const db = getDatabase();
-  const command = input.command ?? null;
+  const command = input.command ? normalizeTelegramCommandName(input.command) : null;
   const shouldCheckCommandPermission = Boolean(command && !reservedTelegramCommandNames.has(command));
   const permissions = shouldCheckCommandPermission
     ? await db

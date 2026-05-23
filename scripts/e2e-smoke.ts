@@ -29,7 +29,6 @@ import { hashPassword } from "@raiden/server/auth";
 import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
 import { planMakotoToolUse } from "@raiden/shared/boot";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
-import { isTelegramBotAdminId } from "../packages/bot/src/bot.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
 
@@ -153,6 +152,18 @@ async function main() {
   }
   if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
     throw new Error("Standalone non-search prompts should be semantic-cache candidates");
+  }
+  const plannerSearchDecision = await planMakotoToolUse({
+    content: "E2E_PLANNER_WEB_ACTION ordinary planner passthrough"
+  });
+  if (plannerSearchDecision.action !== "web_search" || plannerSearchDecision.query !== "planner supplied search query") {
+    throw new Error(`Planner web_search decisions should pass through without regex denial, got ${plannerSearchDecision.action}`);
+  }
+  const plannerImageDecision = await planMakotoToolUse({
+    content: "E2E_PLANNER_IMAGE_ACTION ordinary planner passthrough"
+  });
+  if (plannerImageDecision.action !== "makoto_image" || plannerImageDecision.prompt !== "planner supplied image prompt") {
+    throw new Error(`Planner makoto_image decisions should pass through without regex denial, got ${plannerImageDecision.action}`);
   }
   const validNoneSearchDecision = await planMakotoToolUse({
     content: "E2E_VALID_NONE_SEARCH 请联网搜索 RaidenShinBoot 工具架构。"
@@ -585,6 +596,14 @@ async function main() {
     if (modelCommandRuleResponse.status !== 400) {
       throw new Error(`Reserved /model command permission should be rejected, got ${modelCommandRuleResponse.status}`);
     }
+    const slashModelCommandRuleResponse = await authedRequest("/api/telegram/command-permissions", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatId: null, command: "/model", enabled: false })
+    });
+    if (slashModelCommandRuleResponse.status !== 400) {
+      throw new Error(`Reserved /model command permission with leading slash should be rejected, got ${slashModelCommandRuleResponse.status}`);
+    }
     const repositoryRejectedModelCommand = await (async () => {
       try {
         await upsertTelegramCommandPermission({ chatId: null, command: "model", enabled: false });
@@ -596,6 +615,17 @@ async function main() {
     if (!repositoryRejectedModelCommand) {
       throw new Error("Repository should reject reserved /model command permission writes");
     }
+    const repositoryRejectedSlashModelCommand = await (async () => {
+      try {
+        await upsertTelegramCommandPermission({ chatId: null, command: "/model", enabled: false });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!repositoryRejectedSlashModelCommand) {
+      throw new Error("Repository should reject reserved /model command permission writes with leading slash");
+    }
     const modelCommandAccess = await resolveTelegramChatAccess({
       chatId: "-1001234567890",
       type: "supergroup",
@@ -605,14 +635,14 @@ async function main() {
     if (!modelCommandAccess.allowed) {
       throw new Error("Hidden /model command should remain readable for approved chats when no permission rule exists");
     }
-    const originalBotAdminTelegramIds = process.env.BOT_ADMIN_TELEGRAM_IDS;
-    process.env.BOT_ADMIN_TELEGRAM_IDS = `${botUserNumericId}, 123456`;
-    try {
-      if (!isTelegramBotAdminId(botUserNumericId) || isTelegramBotAdminId(botUserNumericId + 1)) {
-        throw new Error("BOT_ADMIN_TELEGRAM_IDS should gate Telegram model switching by exact Telegram user id");
-      }
-    } finally {
-      restoreEnv("BOT_ADMIN_TELEGRAM_IDS", originalBotAdminTelegramIds);
+    const slashModelCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "/model"
+    });
+    if (!slashModelCommandAccess.allowed) {
+      throw new Error("Hidden /model command access should normalize a leading slash");
     }
     const scopedPermission = (await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true })) as {
       data: { id: string };
@@ -878,6 +908,37 @@ async function main() {
     }
     if (!relayState.imagePrompts.some((prompt) => prompt.includes("稻妻夜色") && prompt.includes("Raiden Makoto"))) {
       throw new Error("Image prompt did not include the user request and Makoto visual guidance");
+    }
+    const autonomousImagePromptCountBefore = relayState.imagePrompts.length;
+    const autonomousImageChat = await authedRequest("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        content: "E2E_CHAT_AUTONOMOUS_IMAGE ordinary planner-selected visual request"
+      })
+    });
+    if (!autonomousImageChat.ok) {
+      throw new Error(`Autonomous image chat failed with ${autonomousImageChat.status}: ${await autonomousImageChat.text()}`);
+    }
+    const autonomousImagePayload = (await autonomousImageChat.json()) as {
+      images?: Array<{ base64?: string; mediaType?: string }>;
+      toolDecision?: { action?: string };
+      toolStatus?: { name?: string | null; status?: string };
+    };
+    if (
+      autonomousImagePayload.toolDecision?.action !== "makoto_image" ||
+      autonomousImagePayload.toolStatus?.name !== "makoto_image" ||
+      autonomousImagePayload.toolStatus.status !== "completed" ||
+      !autonomousImagePayload.images?.[0]?.base64
+    ) {
+      throw new Error("Autonomous image chat did not execute makoto_image and return an image");
+    }
+    if (
+      relayState.imagePrompts.length <= autonomousImagePromptCountBefore ||
+      !relayState.imagePrompts.some((prompt) => prompt.includes("自主生图画面") && prompt.includes("Raiden Makoto"))
+    ) {
+      throw new Error("Autonomous image chat did not rewrite and send the image prompt");
     }
 
     const semanticCacheSmoke = await (async () => {

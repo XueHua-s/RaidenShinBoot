@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - "test/**"
 
 jobs:
   validate:
@@ -51,6 +50,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm db:migrate
+
+      - run: cp .env.example .env && docker compose --profile app --profile bot --profile worker config
 
       - run: pnpm run lint:code
 

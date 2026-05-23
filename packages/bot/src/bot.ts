@@ -15,23 +15,6 @@ const hiddenCommandNames = new Set(["model"]);
 const handledCommandNames = new Set([...publicBotCommands.map((command) => command.command), ...hiddenCommandNames]);
 const telegramMessageBudget = 3500;
 
-function configuredTelegramAdminIds(env: NodeJS.ProcessEnv = process.env) {
-  return new Set(
-    (env.BOT_ADMIN_TELEGRAM_IDS ?? "")
-      .split(/[,\s]+/)
-      .map((value) => value.trim())
-      .filter(Boolean)
-  );
-}
-
-export function isTelegramBotAdminId(telegramId: string | number | null | undefined, env: NodeJS.ProcessEnv = process.env) {
-  return telegramId !== null && telegramId !== undefined && configuredTelegramAdminIds(env).has(String(telegramId));
-}
-
-function canSwitchTelegramModel(ctx: Context) {
-  return isTelegramBotAdminId(ctx.from?.id);
-}
-
 function updateConstraint(ctx: Context) {
   if (ctx.chat?.id !== undefined) {
     return `chat:${ctx.chat.id}`;
@@ -175,7 +158,7 @@ export function createRaidenBot(token: string) {
     try {
       if (!modelArg) {
         const models = await listEffectiveChatModels();
-        await replyTextChunks(ctx, [`当前对话模型：${models.currentModel}`, "查看列表：/model list", "管理员切换：/model <model_id>"].join("\n"));
+        await replyTextChunks(ctx, [`当前对话模型：${models.currentModel}`, "查看列表：/model list", "切换：/model <model_id>"].join("\n"));
         return;
       }
 
@@ -183,11 +166,6 @@ export function createRaidenBot(token: string) {
         for (const chunk of formatModelListChunks(await listEffectiveChatModels())) {
           await ctx.reply(chunk);
         }
-        return;
-      }
-
-      if (!canSwitchTelegramModel(ctx)) {
-        await ctx.reply("只有配置在 BOT_ADMIN_TELEGRAM_IDS 的 Telegram 管理员可以切换全局对话模型。");
         return;
       }
 

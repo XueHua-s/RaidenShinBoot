@@ -105,6 +105,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
     }
   }
 
+  const commandInvalid = Boolean(commandName.trim()) && !canManageCommand(commandName);
   const commandSubmittable = canModerate && canManageCommand(commandName);
 
   return (
@@ -223,6 +224,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
             <Label>
               {t("telegram.command")}
               <Input disabled={!canModerate} value={commandName} onChange={(event) => setCommandName(event.target.value)} placeholder="start" />
+              {commandInvalid && <span className="text-xs font-medium text-red-600">{t("telegram.commandInvalid")}</span>}
             </Label>
             <label className="grid gap-1.5 text-sm font-medium text-zinc-700">
               {t("telegram.permissionState")}

@@ -287,6 +287,39 @@ function resolveMockChatContent(system: string, prompt: string, state: MockRelay
     return resolveMockSummary(prompt, state);
   }
 
+  if (system.includes("图像提示词生成器")) {
+    return prompt.includes("E2E_CHAT_AUTONOMOUS_IMAGE")
+      ? "Raiden Makoto autonomous image prompt: 自主生图画面，柔和雷光与樱花。"
+      : "Raiden Makoto image prompt: 稻妻夜色里的樱花与柔和雷光。";
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_PLANNER_WEB_ACTION")) {
+    return JSON.stringify({
+      action: "web_search",
+      reason: "E2E planner selected search",
+      query: "planner supplied search query",
+      prompt: null
+    });
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_PLANNER_IMAGE_ACTION")) {
+    return JSON.stringify({
+      action: "makoto_image",
+      reason: "E2E planner selected image",
+      query: null,
+      prompt: "planner supplied image prompt"
+    });
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_CHAT_AUTONOMOUS_IMAGE")) {
+    return JSON.stringify({
+      action: "makoto_image",
+      reason: "E2E planner selected autonomous image",
+      query: null,
+      prompt: "E2E_CHAT_AUTONOMOUS_IMAGE 自主生图画面"
+    });
+  }
+
   if (system.includes("工具规划器") && prompt.includes("E2E_VALID_NONE_")) {
     return JSON.stringify({
       action: "none",

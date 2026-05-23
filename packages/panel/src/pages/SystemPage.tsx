@@ -437,30 +437,18 @@ function EndpointAndModelSections({
               {t("common.refresh")}
             </Button>
           </div>
-          {chatModelIds.length > 0 ? (
-            <select
-              className="h-10 w-full min-w-0 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-              disabled={!canWriteSystem}
-              value={form.bootChatModel}
-              onChange={(event) => updateForm({ bootChatModel: event.target.value })}
-            >
-              {invalidCurrentModel && (
-                <option disabled value={form.bootChatModel}>
-                  {t("system.currentModelUnavailable", { model: form.bootChatModel })}
-                </option>
-              )}
+          <Input
+            disabled={!canWriteSystem}
+            list="chat-model-options"
+            value={form.bootChatModel}
+            onChange={(event) => updateForm({ bootChatModel: event.target.value })}
+          />
+          {chatModelIds.length > 0 && (
+            <datalist id="chat-model-options">
               {chatModelIds.map((modelId) => (
-                <option key={modelId} value={modelId}>
-                  {modelId}
-                </option>
+                <option key={modelId} value={modelId} />
               ))}
-            </select>
-          ) : (
-            <Input
-              disabled={!canWriteSystem}
-              value={form.bootChatModel}
-              onChange={(event) => updateForm({ bootChatModel: event.target.value })}
-            />
+            </datalist>
           )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
             <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
@@ -470,7 +458,7 @@ function EndpointAndModelSections({
                   ? t("common.checking")
                   : t("system.modelListLoaded", { count: chatModels?.models.length ?? 0 })}
             </Badge>
-            {invalidCurrentModel && <Badge tone="danger">{t("system.currentModelMustChange")}</Badge>}
+            {invalidCurrentModel && <Badge tone="warning">{t("system.currentModelMustChange")}</Badge>}
             {chatModelsError && <span className="min-w-0 truncate">{chatModelsError}</span>}
             {chatModels?.source && <span className="min-w-0 truncate" title={chatModels.source}>{chatModels.source}</span>}
           </div>

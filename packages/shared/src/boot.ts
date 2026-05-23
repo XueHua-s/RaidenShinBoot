@@ -611,15 +611,6 @@ function parseToolDecision(text: string): BootToolDecision {
 
 function normalizeToolDecision(decision: BootToolDecision, content: string): BootToolDecision {
   if (decision.action === "web_search") {
-    if (!shouldUseBootSearchForMessage(content)) {
-      return {
-        action: "none",
-        reason: "工具规划建议搜索，但用户没有明确搜索或知识检索意图。",
-        query: null,
-        prompt: null
-      };
-    }
-
     return {
       ...decision,
       query: decision.query?.trim() || content.slice(0, 500),
@@ -628,15 +619,6 @@ function normalizeToolDecision(decision: BootToolDecision, content: string): Boo
   }
 
   if (decision.action === "makoto_image") {
-    if (!shouldUseExplicitMakotoImageForMessage(content)) {
-      return {
-        action: "none",
-        reason: "工具规划建议生图，但用户没有明确图片生成意图。",
-        query: null,
-        prompt: null
-      };
-    }
-
     return {
       ...decision,
       query: null,
