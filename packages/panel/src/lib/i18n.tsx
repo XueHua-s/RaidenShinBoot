@@ -1,8 +1,4 @@
-import dayjs from "dayjs";
-import "dayjs/locale/en.js";
-import "dayjs/locale/zh-cn.js";
-import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo } from "react";
-import useLocalStorage from "react-use/esm/useLocalStorage.js";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 export type Locale = "zh" | "en";
 
@@ -594,6 +590,18 @@ function normalizeLocale(value: unknown): Locale {
   return value === "en" || value === "zh" ? value : "zh";
 }
 
+function storedLocale() {
+  if (typeof window === "undefined") {
+    return "zh";
+  }
+
+  try {
+    return normalizeLocale(window.localStorage.getItem(localeStorageKey));
+  } catch {
+    return "zh";
+  }
+}
+
 function interpolate(value: string, variables?: Variables) {
   if (!variables) {
     return value;
@@ -631,19 +639,38 @@ function formatSearchResultProvider(t: I18nContextValue["t"], value: string | nu
     .join(", ")})`;
 }
 
+function formatDateForLocale(raw: string | null | undefined, locale: Locale) {
+  if (!raw) {
+    return "-";
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return "Invalid Date";
+  }
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return locale === "zh" ? `${month}月${day}日 ${hours}:${minutes}` : `${month}/${day} ${hours}:${minutes}`;
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [storedLocale, setStoredLocale] = useLocalStorage<Locale>(localeStorageKey, "zh", { raw: true });
-  const locale = normalizeLocale(storedLocale);
-  const setLocale = useCallback((nextLocale: Locale) => setStoredLocale(nextLocale), [setStoredLocale]);
+  const [locale, setLocaleState] = useState<Locale>(storedLocale);
+  const setLocale = useCallback((nextLocale: Locale) => setLocaleState(nextLocale), []);
 
   useEffect(() => {
     document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    try {
+      window.localStorage.setItem(localeStorageKey, locale);
+    } catch {
+      // Locale still updates in React state when persistent storage is unavailable.
+    }
   }, [locale]);
 
   const value = useMemo<I18nContextValue>(() => {
     const t = (key: TranslationKey, variables?: Variables) => interpolate(dictionaries[locale][key], variables);
-    const dateLocale = locale === "zh" ? "zh-cn" : "en";
-    const dateFormat = locale === "zh" ? "MM月DD日 HH:mm" : "MM/DD HH:mm";
     return {
       locale,
       setLocale,
@@ -661,7 +688,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       formatToolName: (raw) => rawOrMapped(t, "toolName", raw),
       formatCacheStatus: (raw) => rawOrMapped(t, "cacheStatus", raw),
       formatDepth: (raw) => rawOrMapped(t, "depth", raw),
-      formatDate: (raw) => (raw ? dayjs(raw).locale(dateLocale).format(dateFormat) : "-")
+      formatDate: (raw) => formatDateForLocale(raw, locale)
     };
   }, [locale, setLocale]);
 

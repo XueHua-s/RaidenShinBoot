@@ -241,6 +241,7 @@ async function main() {
       return response.json() as Promise<{
         data: {
           bootBaseUrl?: string;
+          bootChatBaseUrl?: string | null;
           bootEmbeddingModel?: string;
           bootImageModel?: string;
           bootSearchProvider?: string;
@@ -363,6 +364,19 @@ async function main() {
       !runtimeSettings.data.secrets.bootSearchApiKey
     ) {
       throw new Error("Runtime settings did not persist new-api relay and secret status");
+    }
+
+    const isolatedChatBasePatch = await patchRuntimeSettings({
+      bootChatBaseUrl: "http://127.0.0.1:1/v1"
+    });
+    if (isolatedChatBasePatch.data.bootChatBaseUrl !== "http://127.0.0.1:1/v1") {
+      throw new Error("Runtime settings should allow chat base URL updates without probing the unchanged chat model");
+    }
+    const restoredChatBasePatch = await patchRuntimeSettings({
+      bootChatBaseUrl: `http://127.0.0.1:${port}/v1`
+    });
+    if (restoredChatBasePatch.data.bootChatBaseUrl !== `http://127.0.0.1:${port}/v1`) {
+      throw new Error("Runtime settings did not restore the chat base URL after isolated patch validation");
     }
 
     const failedAtomicSettingsResponse = await (async () => {

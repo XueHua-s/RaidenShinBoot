@@ -1,6 +1,4 @@
 import * as robot3Module from "robot3";
-import { compact, flatMap, range, uniq, uniqBy } from "lodash-es";
-import pLimit from "p-limit";
 import { z } from "zod";
 import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
 import type { BootSearchChannel, WebSearchRequest, WebSearchResponse, WebSearchResult } from "./schemas.js";
@@ -284,25 +282,8 @@ function planSearch(request: WebSearchRequest, config: BootSearchConfig, options
 }
 
 async function executeSearchPlan(plan: SearchPlan, context: SearchMachineContext): Promise<WebSearchResponse> {
-  const limitChannelSearch = pLimit(searchChannelConcurrency);
-  const attempts = await Promise.all(
-    plan.channels.map((channel) =>
-      limitChannelSearch(async (): Promise<SearchChannelAttempt> => {
-        try {
-          return {
-            status: "completed",
-            results: await executeSearchChannel(channel, plan, context)
-          };
-        } catch (error) {
-          return {
-            status: "failed",
-            failure: `${channel}: ${formatBootSearchError(error)}`,
-            error
-          };
-        }
-      })
-    )
-  );
+  const attempts = await executeSearchChannels(plan, context);
+
   const resultSets: WebSearchResult[][] = [];
   const failures: string[] = [];
   const errors: unknown[] = [];
@@ -332,6 +313,40 @@ async function executeSearchPlan(plan: SearchPlan, context: SearchMachineContext
     failures,
     results: dedupedResults
   };
+}
+
+async function executeSearchChannels(plan: SearchPlan, context: SearchMachineContext) {
+  const attempts: SearchChannelAttempt[] = [];
+  const workerCount = Math.min(searchChannelConcurrency, plan.channels.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const channelIndex = nextIndex;
+        nextIndex += 1;
+        if (channelIndex >= plan.channels.length) {
+          return;
+        }
+
+        const channel = plan.channels[channelIndex] as BootSearchChannel;
+        try {
+          attempts[channelIndex] = {
+            status: "completed",
+            results: await executeSearchChannel(channel, plan, context)
+          };
+        } catch (error) {
+          attempts[channelIndex] = {
+            status: "failed",
+            failure: `${channel}: ${formatBootSearchError(error)}`,
+            error
+          };
+        }
+      }
+    })
+  );
+
+  return attempts;
 }
 
 async function executeSearchChannel(channel: BootSearchChannel, plan: SearchPlan, context: SearchMachineContext) {
@@ -668,13 +683,33 @@ function knowledgeSearchQuery(query: string) {
 }
 
 function uniqueChannels(channels: BootSearchChannel[]) {
-  return uniq(channels);
+  return Array.from(new Set(channels));
 }
 
 function mergeChannelResults(resultSets: WebSearchResult[][], maxResults: number) {
+  const seen = new Set<string>();
+  const merged: WebSearchResult[] = [];
   const maxLength = Math.max(0, ...resultSets.map((results) => results.length));
-  const interleaved = flatMap(range(maxLength), (index) => compact(resultSets.map((results) => results[index])));
-  return uniqBy(interleaved, (result) => result.url.toLowerCase()).slice(0, maxResults);
+
+  for (let index = 0; index < maxLength && merged.length < maxResults; index += 1) {
+    for (const results of resultSets) {
+      const result = results[index];
+      if (!result) {
+        continue;
+      }
+      const key = result.url.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(result);
+      if (merged.length >= maxResults) {
+        break;
+      }
+    }
+  }
+
+  return merged;
 }
 
 function joinUrl(baseUrl: string, path: string) {

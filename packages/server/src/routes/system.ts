@@ -238,19 +238,18 @@ function applyRuntimeSettingsRequestToEnv(env: NodeJS.ProcessEnv, body: UpdateRu
 }
 
 async function validateRuntimeChatModelPatch(body: UpdateRuntimeSettingsRequest) {
-  const chatProviderTouched =
-    "bootChatModel" in body ||
-    "gatewayPreset" in body ||
-    "bootBaseUrl" in body ||
-    "bootChatBaseUrl" in body ||
-    "bootApiKey" in body ||
-    "bootChatApiKey" in body;
-  if (!chatProviderTouched) {
+  if (!("bootChatModel" in body)) {
     return;
   }
 
-  const candidateConfig = getBootConfig(applyRuntimeSettingsRequestToEnv(await loadRuntimeEnv(), body));
+  const runtimeEnv = await loadRuntimeEnv();
+  const currentConfig = getBootConfig(runtimeEnv);
+  const candidateConfig = getBootConfig(applyRuntimeSettingsRequestToEnv(runtimeEnv, body));
   const modelId = candidateConfig.BOOT_CHAT_MODEL;
+  if (modelId === currentConfig.BOOT_CHAT_MODEL) {
+    return;
+  }
+
   if (!isLikelyChatModelId(modelId)) {
     throw new HTTPException(400, {
       message: "BOOT_CHAT_MODEL must be a chat-capable model. Fixed embedding/image models cannot be used as the chat model."
@@ -328,6 +327,10 @@ export const systemRoute = new Hono<{ Variables: AuthVariables }>()
       } else {
         upserts.push(change.upsert);
       }
+    }
+
+    if (deletes.length === 0 && upserts.length === 0) {
+      return c.json({ data: before });
     }
 
     const changedKeys = [...deletes, ...upserts.map((setting) => setting.key)];

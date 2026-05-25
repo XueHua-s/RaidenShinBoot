@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { RefreshCw, Save, Search, Settings2 } from "lucide-react";
-import type { AdminUserDto, ChatModelListResponse, RuntimeSettings, SystemStatus } from "@raiden/shared";
+import type { AdminUserDto, ChatModelListResponse, RuntimeSettings, SystemStatus, UpdateRuntimeSettingsRequest } from "@raiden/shared";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card.js";
@@ -71,6 +71,54 @@ function settingsToForm(settings: RuntimeSettings): RuntimeSettingsForm {
     bootSearchMaxResults: settings.bootSearchMaxResults,
     bootSearchDepth: settings.bootSearchDepth
   };
+}
+
+function optionalText(value: string | null) {
+  return value || null;
+}
+
+function buildRuntimeSettingsPatch(input: {
+  form: RuntimeSettingsForm;
+  secretClears: Record<RuntimeSecretKey, boolean>;
+  secretValues: Record<RuntimeSecretKey, string>;
+  settings: RuntimeSettings;
+}): Partial<UpdateRuntimeSettingsRequest> {
+  const { form, secretClears, secretValues, settings } = input;
+  const patch: Partial<UpdateRuntimeSettingsRequest> = {};
+
+  const assignIfChanged = <Key extends keyof UpdateRuntimeSettingsRequest>(
+    key: Key,
+    value: UpdateRuntimeSettingsRequest[Key],
+    current: UpdateRuntimeSettingsRequest[Key]
+  ) => {
+    if (value !== current) {
+      patch[key] = value;
+    }
+  };
+
+  assignIfChanged("gatewayPreset", form.gatewayPreset, settings.gatewayPreset);
+  assignIfChanged("bootBaseUrl", form.bootBaseUrl, settings.bootBaseUrl);
+  assignIfChanged("bootChatBaseUrl", optionalText(form.bootChatBaseUrl), settings.bootChatBaseUrl);
+  assignIfChanged("bootEmbeddingBaseUrl", optionalText(form.bootEmbeddingBaseUrl), settings.bootEmbeddingBaseUrl);
+  assignIfChanged("bootImageBaseUrl", optionalText(form.bootImageBaseUrl), settings.bootImageBaseUrl);
+  assignIfChanged("bootSearchBaseUrl", optionalText(form.bootSearchBaseUrl), settings.bootSearchBaseUrl);
+  assignIfChanged("bootWikipediaApiUrl", form.bootWikipediaApiUrl, settings.bootWikipediaApiUrl);
+  assignIfChanged("bootMoegirlApiUrl", form.bootMoegirlApiUrl, settings.bootMoegirlApiUrl);
+  assignIfChanged("bootChatModel", form.bootChatModel, settings.bootChatModel);
+  assignIfChanged("bootSearchProvider", form.bootSearchProvider, settings.bootSearchProvider);
+  assignIfChanged("bootSearchMaxResults", form.bootSearchMaxResults, settings.bootSearchMaxResults);
+  assignIfChanged("bootSearchDepth", form.bootSearchDepth, settings.bootSearchDepth);
+
+  for (const [key] of runtimeSecretLabels) {
+    const secretValue = secretValues[key].trim();
+    if (secretClears[key]) {
+      patch[key] = null;
+    } else if (secretValue) {
+      patch[key] = secretValue;
+    }
+  }
+
+  return patch;
 }
 
 type RuntimeSettingsDraft = {
@@ -185,7 +233,7 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
   );
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!form || !canWriteSystem) {
+    if (!form || !settings || !canWriteSystem) {
       return;
     }
 
@@ -193,30 +241,15 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
     setError(null);
     setNotice(null);
     try {
-      const secretPatch = runtimeSecretLabels.reduce<Record<string, string | null>>((accumulator, [key]) => {
-        if (secretClears[key]) {
-          accumulator[key] = null;
-        } else if (secretValues[key].trim()) {
-          accumulator[key] = secretValues[key].trim();
-        }
-        return accumulator;
-      }, {});
+      const patch = buildRuntimeSettingsPatch({ form, secretClears, secretValues, settings });
+      if (Object.keys(patch).length === 0) {
+        dispatchDraft({ type: "reset", settings });
+        setNotice(t("system.settingsSaved"));
+        return;
+      }
+
       const response = await apiClient.api.system.settings.$patch({
-        json: {
-          gatewayPreset: form.gatewayPreset,
-          bootBaseUrl: form.bootBaseUrl,
-          bootChatBaseUrl: form.bootChatBaseUrl || null,
-          bootEmbeddingBaseUrl: form.bootEmbeddingBaseUrl || null,
-          bootImageBaseUrl: form.bootImageBaseUrl || null,
-          bootSearchBaseUrl: form.bootSearchBaseUrl || null,
-          bootWikipediaApiUrl: form.bootWikipediaApiUrl,
-          bootMoegirlApiUrl: form.bootMoegirlApiUrl,
-          bootChatModel: form.bootChatModel,
-          bootSearchProvider: form.bootSearchProvider,
-          bootSearchMaxResults: form.bootSearchMaxResults,
-          bootSearchDepth: form.bootSearchDepth,
-          ...secretPatch
-        }
+        json: patch
       });
       const payload = await readJson<{ data: RuntimeSettings }>(response);
       setSettings(payload.data);
