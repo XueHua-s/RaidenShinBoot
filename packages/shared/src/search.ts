@@ -8,6 +8,7 @@ const robot3 =
     ? (robot3Module as typeof robot3Module & { default: typeof robot3Module }).default
     : robot3Module;
 const { createMachine, interpret, invoke, reduce, state, transition } = robot3;
+const searchChannelConcurrency = 2;
 
 const optionalString = z.preprocess((value) => (value === "" ? undefined : value), z.string().optional());
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
@@ -58,6 +59,10 @@ type SearchPlan = {
   maxResults: number;
   channels: BootSearchChannel[];
 };
+
+type SearchChannelAttempt =
+  | { status: "completed"; results: WebSearchResult[] }
+  | { status: "failed"; failure: string; error: unknown };
 
 type SearchMachineContext = {
   request: WebSearchRequest;
@@ -125,11 +130,12 @@ export function getBootSearchConfig(env: NodeJS.ProcessEnv = process.env): BootS
 
 export function isWebSearchConfigured(env: NodeJS.ProcessEnv = process.env) {
   const config = getBootSearchConfig(env);
-  return Boolean(config.BOOT_WIKIPEDIA_API_URL || config.BOOT_MOEGIRL_API_URL || config.BOOT_SEARCH_API_KEY);
+  return config.BOOT_SEARCH_PROVIDER !== "disabled" && Boolean(config.BOOT_WIKIPEDIA_API_URL || config.BOOT_MOEGIRL_API_URL || config.BOOT_SEARCH_API_KEY);
 }
 
 export async function searchWeb(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const context: SearchMachineContext = {
     request: input,
     config,
@@ -144,6 +150,7 @@ export async function searchWeb(input: WebSearchRequest, options: SearchWebOptio
 
 export async function searchGoogle(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await searchGoogleResults(input.query, maxResults, config, options.fetch ?? fetch);
   return {
@@ -158,6 +165,7 @@ export async function searchGoogle(input: WebSearchRequest, options: SearchWebOp
 
 export async function searchWikipedia(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await mediaWikiSearch({
     query: input.query,
@@ -179,6 +187,7 @@ export async function searchWikipedia(input: WebSearchRequest, options: SearchWe
 
 export async function searchMoegirl(input: WebSearchRequest, options: SearchWebOptions = {}): Promise<WebSearchResponse> {
   const config = options.config ?? getBootSearchConfig();
+  assertExternalSearchEnabled(config);
   const maxResults = Math.min(input.maxResults, config.BOOT_SEARCH_MAX_RESULTS);
   const results = await mediaWikiSearch({
     query: input.query,
@@ -196,6 +205,16 @@ export async function searchMoegirl(input: WebSearchRequest, options: SearchWebO
     failures: [],
     results
   };
+}
+
+function assertExternalSearchEnabled(config: BootSearchConfig) {
+  if (config.BOOT_SEARCH_PROVIDER === "disabled") {
+    throw new BootSearchError(
+      "search_disabled",
+      "BOOT_SEARCH_PROVIDER is disabled; external search channels are disabled.",
+      503
+    );
+  }
 }
 
 function runSearchStateMachine(context: SearchMachineContext) {
@@ -263,17 +282,18 @@ function planSearch(request: WebSearchRequest, config: BootSearchConfig, options
 }
 
 async function executeSearchPlan(plan: SearchPlan, context: SearchMachineContext): Promise<WebSearchResponse> {
+  const attempts = await executeSearchChannels(plan, context);
+
   const resultSets: WebSearchResult[][] = [];
   const failures: string[] = [];
   const errors: unknown[] = [];
 
-  for (const channel of plan.channels) {
-    try {
-      const channelResults = await executeSearchChannel(channel, plan, context);
-      resultSets.push(channelResults);
-    } catch (error) {
-      failures.push(`${channel}: ${formatBootSearchError(error)}`);
-      errors.push(error);
+  for (const attempt of attempts) {
+    if (attempt.status === "completed") {
+      resultSets.push(attempt.results);
+    } else {
+      failures.push(attempt.failure);
+      errors.push(attempt.error);
     }
   }
 
@@ -293,6 +313,40 @@ async function executeSearchPlan(plan: SearchPlan, context: SearchMachineContext
     failures,
     results: dedupedResults
   };
+}
+
+async function executeSearchChannels(plan: SearchPlan, context: SearchMachineContext) {
+  const attempts: SearchChannelAttempt[] = [];
+  const workerCount = Math.min(searchChannelConcurrency, plan.channels.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const channelIndex = nextIndex;
+        nextIndex += 1;
+        if (channelIndex >= plan.channels.length) {
+          return;
+        }
+
+        const channel = plan.channels[channelIndex] as BootSearchChannel;
+        try {
+          attempts[channelIndex] = {
+            status: "completed",
+            results: await executeSearchChannel(channel, plan, context)
+          };
+        } catch (error) {
+          attempts[channelIndex] = {
+            status: "failed",
+            failure: `${channel}: ${formatBootSearchError(error)}`,
+            error
+          };
+        }
+      }
+    })
+  );
+
+  return attempts;
 }
 
 async function executeSearchChannel(channel: BootSearchChannel, plan: SearchPlan, context: SearchMachineContext) {

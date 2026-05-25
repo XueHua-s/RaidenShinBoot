@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 export type Locale = "zh" | "en";
 
@@ -34,7 +34,9 @@ const zh = {
   "common.save": "保存配置",
   "common.saving": "保存中",
   "common.create": "创建账号",
+  "common.delete": "删除",
   "common.clear": "清空",
+  "common.readOnly": "只读",
   "common.keepSecret": "留空则保持不变",
   "common.pasteSecret": "粘贴密钥以设置",
   "gateway.openaiCompatible": "OpenAI 兼容",
@@ -135,6 +137,8 @@ const zh = {
   "telegram.deny": "拒绝",
   "telegram.saveRule": "保存规则",
   "telegram.commandPermissionEmpty": "暂无命令权限规则。",
+  "telegram.commandInvalid": "命令只能包含小写字母、数字、下划线，且 /model 是隐藏保留命令。",
+  "telegram.deleteRuleConfirm": "确认删除这条命令权限规则？",
   "chatConsole.title": "安全聊天测试台",
   "chatConsole.description": "使用受保护 API 路由测试对话、长期记忆和搜索降级。",
   "chatConsole.telegramId": "用户 ID",
@@ -143,6 +147,44 @@ const zh = {
   "chatConsole.send": "发送",
   "chatConsole.thinking": "思考中",
   "chatConsole.memoryRecalled": "召回 {count} 条记忆",
+  "chatConsole.searchUsed": "搜索 {count} 条结果",
+  "chatConsole.generatedImage": "生成图片 {index}",
+  "chatConsole.toolName": "工具",
+  "chatConsole.reason": "原因",
+  "chatConsole.query": "查询",
+  "chatConsole.prompt": "提示词",
+  "chatConsole.cacheSimilarity": "缓存相似度",
+  "toolAction.none": "不调用工具",
+  "toolAction.web_search": "联网搜索",
+  "toolAction.makoto_image": "生成图片",
+  "toolName.web_search": "联网搜索",
+  "toolName.google_search": "Google 搜索",
+  "toolName.wikipedia_search": "维基百科",
+  "toolName.moegirl_search": "萌娘百科",
+  "toolName.makoto_image": "生成图片",
+  "cacheStatus.disabled": "缓存关闭",
+  "cacheStatus.miss": "缓存未命中",
+  "cacheStatus.l1_hit": "精确缓存命中",
+  "cacheStatus.l2_hit": "语义缓存命中",
+  "searchStatus.completed": "已完成",
+  "searchStatus.partial": "部分完成",
+  "searchStatus.failed": "失败",
+  "searchProvider.router": "路由搜索",
+  "searchProvider.google": "Google 搜索",
+  "searchProvider.wikipedia": "维基百科",
+  "searchProvider.moegirl": "萌娘百科",
+  "searchProvider.tavily": "Tavily",
+  "searchProvider.brave": "Brave",
+  "searchProvider.serper": "Serper",
+  "searchChannel.google": "Google",
+  "searchChannel.wikipedia": "维基百科",
+  "searchChannel.moegirl": "萌娘百科",
+  "searchDiagnostics.title": "搜索诊断",
+  "searchDiagnostics.description": "验证后台搜索路由、工具注册表、渠道、失败信息和结果。",
+  "searchDiagnostics.query": "搜索内容",
+  "searchDiagnostics.tools": "工具 {count} 个",
+  "searchDiagnostics.run": "执行搜索",
+  "searchDiagnostics.empty": "没有搜索结果。",
   "conversations.title": "对话",
   "conversations.description": "最近消息和受保护的本地聊天测试台。",
   "conversations.messages": "消息",
@@ -154,6 +196,14 @@ const zh = {
   "memory.count": "{count} 条语义记忆。",
   "memory.importance": "重要度 {value}",
   "memory.empty": "暂无记忆。",
+  "memory.recallTitle": "语义召回",
+  "memory.recallDescription": "按用户和问题检索长期记忆；这个能力只在后台开放。",
+  "memory.limit": "数量",
+  "memory.query": "检索内容",
+  "memory.queryPlaceholder": "输入要召回的语义线索...",
+  "memory.recall": "召回记忆",
+  "memory.score": "相关度 {value}",
+  "memory.recallEmpty": "暂无召回结果。",
   "security.title": "安全",
   "security.description": "管理员账号、角色、会话和登录治理。",
   "security.adminAccounts": "管理员账号",
@@ -195,10 +245,15 @@ const zh = {
   "system.imageBaseUrl": "生图基础地址",
   "system.fallbackDefault": "回退到默认值",
   "system.modelMapping": "模型映射",
-  "system.modelHelp": "嵌入模型必须返回 3072 维，才能写入向量记忆。",
+  "system.modelHelp": "聊天模型可从列表选择，也可手动输入新 relay 的模型 ID；嵌入模型必须返回 3072 维。",
   "system.chatModel": "聊天模型",
   "system.embeddingModel": "嵌入模型",
   "system.imageModel": "生图模型",
+  "system.modelListLoaded": "已加载 {count} 个模型",
+  "system.modelListUnavailable": "模型列表不可用",
+  "system.currentModelUnavailable": "当前模型不可选：{model}",
+  "system.currentModelMustChange": "不在已加载列表，保存时会重新校验",
+  "system.fixedModel": "固定模型，仅可调整基础地址和密钥。",
   "system.memoryVector": "记忆向量",
   "system.dimensions": "{count} 维",
   "system.compatible": "兼容",
@@ -256,7 +311,9 @@ const en: Record<keyof typeof zh, string> = {
   "common.save": "Save settings",
   "common.saving": "Saving",
   "common.create": "Create account",
+  "common.delete": "Delete",
   "common.clear": "Clear",
+  "common.readOnly": "Read only",
   "common.keepSecret": "Leave blank to keep",
   "common.pasteSecret": "Paste key to set",
   "gateway.openaiCompatible": "OpenAI-compatible",
@@ -357,6 +414,8 @@ const en: Record<keyof typeof zh, string> = {
   "telegram.deny": "Deny",
   "telegram.saveRule": "Save rule",
   "telegram.commandPermissionEmpty": "No command permission rules yet.",
+  "telegram.commandInvalid": "Commands can only use lowercase letters, numbers, and underscores. /model is hidden and reserved.",
+  "telegram.deleteRuleConfirm": "Delete this command permission rule?",
   "chatConsole.title": "Safe Chat Console",
   "chatConsole.description": "Test conversation, long-term memory, and search fallback through protected API routes.",
   "chatConsole.telegramId": "Telegram ID",
@@ -365,6 +424,44 @@ const en: Record<keyof typeof zh, string> = {
   "chatConsole.send": "Send",
   "chatConsole.thinking": "Thinking",
   "chatConsole.memoryRecalled": "{count} memories recalled",
+  "chatConsole.searchUsed": "{count} search results",
+  "chatConsole.generatedImage": "Generated image {index}",
+  "chatConsole.toolName": "Tool",
+  "chatConsole.reason": "Reason",
+  "chatConsole.query": "Query",
+  "chatConsole.prompt": "Prompt",
+  "chatConsole.cacheSimilarity": "Cache similarity",
+  "toolAction.none": "No tool",
+  "toolAction.web_search": "Web search",
+  "toolAction.makoto_image": "Image generation",
+  "toolName.web_search": "Web search",
+  "toolName.google_search": "Google search",
+  "toolName.wikipedia_search": "Wikipedia",
+  "toolName.moegirl_search": "Moegirl",
+  "toolName.makoto_image": "Image generation",
+  "cacheStatus.disabled": "Cache disabled",
+  "cacheStatus.miss": "Cache miss",
+  "cacheStatus.l1_hit": "Exact cache hit",
+  "cacheStatus.l2_hit": "Semantic cache hit",
+  "searchStatus.completed": "Completed",
+  "searchStatus.partial": "Partial",
+  "searchStatus.failed": "Failed",
+  "searchProvider.router": "Routed search",
+  "searchProvider.google": "Google search",
+  "searchProvider.wikipedia": "Wikipedia",
+  "searchProvider.moegirl": "Moegirl",
+  "searchProvider.tavily": "Tavily",
+  "searchProvider.brave": "Brave",
+  "searchProvider.serper": "Serper",
+  "searchChannel.google": "Google",
+  "searchChannel.wikipedia": "Wikipedia",
+  "searchChannel.moegirl": "Moegirl",
+  "searchDiagnostics.title": "Search Diagnostics",
+  "searchDiagnostics.description": "Validate search routing, tool registry, channels, failures, and results.",
+  "searchDiagnostics.query": "Search query",
+  "searchDiagnostics.tools": "{count} tools",
+  "searchDiagnostics.run": "Run search",
+  "searchDiagnostics.empty": "No search results.",
   "conversations.title": "Conversations",
   "conversations.description": "Recent messages and a protected local chat test console.",
   "conversations.messages": "Messages",
@@ -376,6 +473,14 @@ const en: Record<keyof typeof zh, string> = {
   "memory.count": "{count} semantic notes.",
   "memory.importance": "Importance {value}",
   "memory.empty": "No memories yet.",
+  "memory.recallTitle": "Semantic Recall",
+  "memory.recallDescription": "Search long-term memory by user and semantic query. This is only exposed in the admin panel.",
+  "memory.limit": "Limit",
+  "memory.query": "Query",
+  "memory.queryPlaceholder": "Enter a semantic recall cue...",
+  "memory.recall": "Recall memories",
+  "memory.score": "Score {value}",
+  "memory.recallEmpty": "No recall results.",
   "security.title": "Security",
   "security.description": "Admin accounts, roles, sessions, and login governance.",
   "security.adminAccounts": "Admin Accounts",
@@ -417,10 +522,15 @@ const en: Record<keyof typeof zh, string> = {
   "system.imageBaseUrl": "Image base URL",
   "system.fallbackDefault": "Fallback to default",
   "system.modelMapping": "Model mapping",
-  "system.modelHelp": "The embedding model must return 3072 dimensions before memory can write to halfvec(3072).",
+  "system.modelHelp": "Choose a chat model from the list or type a model ID from a new relay. The embedding model must return 3072 dimensions.",
   "system.chatModel": "Chat model",
   "system.embeddingModel": "Embedding model",
   "system.imageModel": "Image model",
+  "system.modelListLoaded": "{count} models loaded",
+  "system.modelListUnavailable": "Model list unavailable",
+  "system.currentModelUnavailable": "Current model is not selectable: {model}",
+  "system.currentModelMustChange": "Not in the loaded list; save will validate it again",
+  "system.fixedModel": "Fixed model; only base URL and key can be adjusted.",
   "system.memoryVector": "Memory vector",
   "system.dimensions": "{count} dimensions",
   "system.compatible": "Compatible",
@@ -464,19 +574,32 @@ export type I18nContextValue = {
   formatChatType: (value: string | null | undefined) => string;
   formatMessageRole: (value: string | null | undefined) => string;
   formatSearchProvider: (value: string | null | undefined) => string;
+  formatSearchResultProvider: (value: string | null | undefined) => string;
+  formatSearchStatus: (value: string | null | undefined) => string;
+  formatSearchChannel: (value: string | null | undefined) => string;
+  formatToolAction: (value: string | null | undefined) => string;
+  formatToolName: (value: string | null | undefined) => string;
+  formatCacheStatus: (value: string | null | undefined) => string;
   formatDepth: (value: string | null | undefined) => string;
   formatDate: (value: string | null | undefined) => string;
 };
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
+function normalizeLocale(value: unknown): Locale {
+  return value === "en" || value === "zh" ? value : "zh";
+}
+
 function storedLocale() {
   if (typeof window === "undefined") {
     return "zh";
   }
 
-  const value = window.localStorage.getItem(localeStorageKey);
-  return value === "en" || value === "zh" ? value : "zh";
+  try {
+    return normalizeLocale(window.localStorage.getItem(localeStorageKey));
+  } catch {
+    return "zh";
+  }
 }
 
 function interpolate(value: string, variables?: Variables) {
@@ -499,25 +622,58 @@ function rawOrMapped(t: I18nContextValue["t"], prefix: string, value: string | n
   return key in zh ? t(key) : value;
 }
 
+function formatSearchResultProvider(t: I18nContextValue["t"], value: string | null | undefined) {
+  if (!value) {
+    return "-";
+  }
+
+  const [provider, detail] = value.split(":", 2);
+  const label = rawOrMapped(t, "searchProvider", provider);
+  if (!detail) {
+    return label;
+  }
+
+  return `${label} (${detail
+    .split(",")
+    .map((item) => rawOrMapped(t, "searchChannel", item.trim()))
+    .join(", ")})`;
+}
+
+function formatDateForLocale(raw: string | null | undefined, locale: Locale) {
+  if (!raw) {
+    return "-";
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return "Invalid Date";
+  }
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return locale === "zh" ? `${month}月${day}日 ${hours}:${minutes}` : `${month}/${day} ${hours}:${minutes}`;
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(storedLocale);
+  const setLocale = useCallback((nextLocale: Locale) => setLocaleState(nextLocale), []);
 
   useEffect(() => {
-    window.localStorage.setItem(localeStorageKey, locale);
     document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    try {
+      window.localStorage.setItem(localeStorageKey, locale);
+    } catch {
+      // Locale still updates in React state when persistent storage is unavailable.
+    }
   }, [locale]);
 
   const value = useMemo<I18nContextValue>(() => {
-    const dateFormatter = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
     const t = (key: TranslationKey, variables?: Variables) => interpolate(dictionaries[locale][key], variables);
     return {
       locale,
-      setLocale: setLocaleState,
+      setLocale,
       t,
       formatStatus: (raw) => rawOrMapped(t, "status", raw),
       formatRole: (raw) => rawOrMapped(t, "role", raw),
@@ -525,10 +681,16 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       formatChatType: (raw) => rawOrMapped(t, "chatType", raw),
       formatMessageRole: (raw) => rawOrMapped(t, "messageRole", raw),
       formatSearchProvider: (raw) => (raw === "disabled" ? t("provider.disabled") : raw ?? "-"),
+      formatSearchResultProvider: (raw) => formatSearchResultProvider(t, raw),
+      formatSearchStatus: (raw) => rawOrMapped(t, "searchStatus", raw),
+      formatSearchChannel: (raw) => rawOrMapped(t, "searchChannel", raw),
+      formatToolAction: (raw) => rawOrMapped(t, "toolAction", raw),
+      formatToolName: (raw) => rawOrMapped(t, "toolName", raw),
+      formatCacheStatus: (raw) => rawOrMapped(t, "cacheStatus", raw),
       formatDepth: (raw) => rawOrMapped(t, "depth", raw),
-      formatDate: (raw) => (raw ? dateFormatter.format(new Date(raw)) : "-")
+      formatDate: (raw) => formatDateForLocale(raw, locale)
     };
-  }, [locale]);
+  }, [locale, setLocale]);
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

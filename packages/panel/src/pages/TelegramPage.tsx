@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
-import { Save } from "lucide-react";
-import type { TelegramChatDto, TelegramCommandPermissionDto } from "@raiden/shared";
+import { Save, Trash2 } from "lucide-react";
+import type { AdminUserDto, TelegramChatDto, TelegramCommandPermissionDto } from "@raiden/shared";
 import { EmptyRow, ResourcePage, statusTone } from "../components/page.js";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";
@@ -12,7 +12,20 @@ import { apiClient, readJson } from "../lib/apiClient.js";
 import { useI18n } from "../lib/i18n.js";
 import { errorMessage } from "../lib/utils.js";
 
-export function TelegramPage() {
+function canModerateTelegram(user: AdminUserDto) {
+  return user.role === "super_admin" || user.role === "operator";
+}
+
+function normalizeCommandName(value: string) {
+  return value.trim().replace(/^\//, "").toLowerCase();
+}
+
+function canManageCommand(value: string) {
+  const command = normalizeCommandName(value);
+  return /^[a-z0-9_]{1,32}$/.test(command) && command !== "model";
+}
+
+export function TelegramPage({ user }: { user: AdminUserDto }) {
   const { t, formatStatus, formatPolicy, formatChatType, formatDate } = useI18n();
   const { data, total, loading, error, reload } = useResourceList<TelegramChatDto>("telegram-chats", 50);
   const commandPermissions = useResourceList<TelegramCommandPermissionDto>("telegram-command-permissions", 100);
@@ -21,8 +34,14 @@ export function TelegramPage() {
   const [commandChatId, setCommandChatId] = useState("");
   const [commandName, setCommandName] = useState("start");
   const [commandEnabled, setCommandEnabled] = useState(true);
+  const [deletingPermissionId, setDeletingPermissionId] = useState<string | null>(null);
+  const canModerate = canModerateTelegram(user);
 
   async function updateChat(chatId: string, patch: Partial<Pick<TelegramChatDto, "status" | "policy">>) {
+    if (!canModerate) {
+      return;
+    }
+
     setMutationError(null);
     try {
       const response = await apiClient.api.telegram.chats[":chatId"].$patch({
@@ -38,7 +57,12 @@ export function TelegramPage() {
 
   async function saveCommandPermission(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!commandName.trim()) {
+    if (!canModerate) {
+      return;
+    }
+    const command = normalizeCommandName(commandName);
+    if (!canManageCommand(commandName)) {
+      setCommandMutationError(t("telegram.commandInvalid"));
       return;
     }
 
@@ -47,7 +71,7 @@ export function TelegramPage() {
       const response = await apiClient.api.telegram["command-permissions"].$put({
         json: {
           chatId: commandChatId || null,
-          command: commandName.trim().replace(/^\//, "").toLowerCase(),
+          command,
           enabled: commandEnabled
         }
       });
@@ -57,6 +81,32 @@ export function TelegramPage() {
       setCommandMutationError(errorMessage(requestError));
     }
   }
+
+  async function deleteCommandPermission(permission: TelegramCommandPermissionDto) {
+    if (!canModerate) {
+      return;
+    }
+    if (!window.confirm(t("telegram.deleteRuleConfirm"))) {
+      return;
+    }
+
+    setCommandMutationError(null);
+    setDeletingPermissionId(permission.id);
+    try {
+      const response = await apiClient.api.telegram["command-permissions"][":id"].$delete({
+        param: { id: permission.id }
+      });
+      await readJson<{ data: TelegramCommandPermissionDto }>(response);
+      await commandPermissions.reload();
+    } catch (requestError) {
+      setCommandMutationError(errorMessage(requestError));
+    } finally {
+      setDeletingPermissionId(null);
+    }
+  }
+
+  const commandInvalid = Boolean(commandName.trim()) && !canManageCommand(commandName);
+  const commandSubmittable = canModerate && canManageCommand(commandName);
 
   return (
     <ResourcePage
@@ -70,7 +120,10 @@ export function TelegramPage() {
     >
       <Card>
         <CardHeader>
-          <CardTitle>{t("telegram.chats")}</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>{t("telegram.chats")}</CardTitle>
+            {!canModerate && <Badge tone="warning">{t("common.readOnly")}</Badge>}
+          </div>
           <CardDescription>{t("telegram.chatCount", { count: total })}</CardDescription>
         </CardHeader>
         <div className="overflow-x-auto">
@@ -98,7 +151,8 @@ export function TelegramPage() {
                   </Td>
                   <Td>
                     <select
-                      className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+                      className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:opacity-70"
+                      disabled={!canModerate}
                       value={chat.policy}
                       onChange={(event) =>
                         updateChat(chat.chatId, { policy: event.target.value as TelegramChatDto["policy"] })
@@ -113,13 +167,23 @@ export function TelegramPage() {
                   <Td>{formatDate(chat.updatedAt)}</Td>
                   <Td>
                     <div className="flex justify-end gap-2">
-                      <Button onClick={() => updateChat(chat.chatId, { status: "approved" })} size="sm" variant="secondary">
+                      <Button
+                        disabled={!canModerate}
+                        onClick={() => updateChat(chat.chatId, { status: "approved" })}
+                        size="sm"
+                        variant="secondary"
+                      >
                         {t("telegram.approve")}
                       </Button>
-                      <Button onClick={() => updateChat(chat.chatId, { status: "muted" })} size="sm" variant="outline">
+                      <Button disabled={!canModerate} onClick={() => updateChat(chat.chatId, { status: "muted" })} size="sm" variant="outline">
                         {t("telegram.mute")}
                       </Button>
-                      <Button onClick={() => updateChat(chat.chatId, { status: "blocked" })} size="sm" variant="destructive">
+                      <Button
+                        disabled={!canModerate}
+                        onClick={() => updateChat(chat.chatId, { status: "blocked" })}
+                        size="sm"
+                        variant="destructive"
+                      >
                         {t("telegram.block")}
                       </Button>
                     </div>
@@ -133,7 +197,10 @@ export function TelegramPage() {
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>{t("telegram.commandPermissions")}</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>{t("telegram.commandPermissions")}</CardTitle>
+            {!canModerate && <Badge tone="warning">{t("common.readOnly")}</Badge>}
+          </div>
           <CardDescription>{t("telegram.commandPermissionDescription")}</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -141,7 +208,8 @@ export function TelegramPage() {
             <Label>
               {t("telegram.scope")}
               <select
-                className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+                className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-100"
+                disabled={!canModerate}
                 value={commandChatId}
                 onChange={(event) => setCommandChatId(event.target.value)}
               >
@@ -155,7 +223,8 @@ export function TelegramPage() {
             </Label>
             <Label>
               {t("telegram.command")}
-              <Input value={commandName} onChange={(event) => setCommandName(event.target.value)} placeholder="start" />
+              <Input disabled={!canModerate} value={commandName} onChange={(event) => setCommandName(event.target.value)} placeholder="start" />
+              {commandInvalid && <span className="text-xs font-medium text-red-600">{t("telegram.commandInvalid")}</span>}
             </Label>
             <label className="grid gap-1.5 text-sm font-medium text-zinc-700">
               {t("telegram.permissionState")}
@@ -163,6 +232,7 @@ export function TelegramPage() {
                 <input
                   checked={commandEnabled}
                   className="size-4 accent-cyan-600"
+                  disabled={!canModerate}
                   type="checkbox"
                   onChange={(event) => setCommandEnabled(event.target.checked)}
                 />
@@ -170,7 +240,7 @@ export function TelegramPage() {
               </span>
             </label>
             <div className="flex items-end">
-              <Button className="w-full" disabled={!commandName.trim()} type="submit">
+              <Button className="w-full" disabled={!commandSubmittable} type="submit">
                 <Save className="size-4" />
                 {t("telegram.saveRule")}
               </Button>
@@ -184,6 +254,7 @@ export function TelegramPage() {
                   <Th>{t("telegram.command")}</Th>
                   <Th>{t("telegram.permissionState")}</Th>
                   <Th>{t("common.updated")}</Th>
+                  <Th className="text-right">{t("common.actions")}</Th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
@@ -205,9 +276,24 @@ export function TelegramPage() {
                       </Badge>
                     </Td>
                     <Td>{formatDate(permission.updatedAt)}</Td>
+                    <Td>
+                      <div className="flex justify-end">
+                        <Button
+                          aria-label={t("common.delete")}
+                          disabled={!canModerate || deletingPermissionId === permission.id}
+                          onClick={() => deleteCommandPermission(permission)}
+                          size="icon"
+                          title={t("common.delete")}
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    </Td>
                   </tr>
                 ))}
-                {commandPermissions.data.length === 0 && <EmptyRow colSpan={4}>{t("telegram.commandPermissionEmpty")}</EmptyRow>}
+                {commandPermissions.data.length === 0 && <EmptyRow colSpan={5}>{t("telegram.commandPermissionEmpty")}</EmptyRow>}
               </tbody>
             </Table>
           </div>

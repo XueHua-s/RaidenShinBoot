@@ -2,6 +2,7 @@ import { hc } from "hono/client";
 import type { AppType } from "@raiden/server/app";
 
 const csrfStorageKey = "raiden-admin-csrf";
+export const authExpiredEvent = "raiden-auth-expired";
 
 function resolveApiBaseUrl() {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -39,6 +40,10 @@ export const apiClient = hc<AppType>(apiBaseUrl, {
 
 export async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
+    if (response.status === 401) {
+      setCsrfToken(null);
+      window.dispatchEvent(new Event(authExpiredEvent));
+    }
     const text = await response.text();
     try {
       const payload = JSON.parse(text) as { error?: string; message?: string };

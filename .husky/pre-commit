@@ -1,0 +1,1 @@
+pnpm run lint:code && pnpm run check && pnpm run test:tools && pnpm run lint:staged-diff

@@ -1,5 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import * as robot3Module from "robot3";
+import { fixedBootEmbeddingModel } from "@raiden/shared/boot";
 import {
   conversationCachePolicyVersion,
   isStandaloneCacheCandidate,
@@ -67,6 +68,23 @@ type LookupContext = {
   embedding?: number[] | undefined;
   hit?: ConversationCacheHit | undefined;
   reason?: string | undefined;
+};
+
+type ConversationCacheWriteInput = {
+  scope: string;
+  contextFingerprint: string;
+  content: string;
+  reply: string;
+  embedding: number[];
+  model: string;
+  metadata: ConversationCacheMetadata;
+  config?: SemanticCacheConfig | undefined;
+};
+
+type WriteContext = Omit<ConversationCacheWriteInput, "config"> & {
+  config: SemanticCacheConfig;
+  normalizedQuery: string;
+  result?: ConversationCacheWriteResult | undefined;
 };
 
 type DoneEvent<T> = { type: "done"; data: T };
@@ -165,6 +183,62 @@ const lookupMachine = createMachine(
   (context: LookupContext) => context
 );
 
+const writeMachine = createMachine(
+  "checking",
+  {
+    checking: state(
+      immediate(
+        "skipped",
+        guard((context: WriteContext) => !context.config.enabled || !context.config.redisUrl),
+        reduce((context: WriteContext) => ({
+          ...context,
+          result: writeSkipped("semantic cache disabled or REDIS_URL missing")
+        }))
+      ),
+      immediate(
+        "skipped",
+        guard((context: WriteContext) => !isStandaloneCacheCandidate(context.content)),
+        reduce((context: WriteContext) => ({
+          ...context,
+          result: writeSkipped("query is not cacheable")
+        }))
+      ),
+      immediate(
+        "skipped",
+        guard((context: WriteContext) => context.embedding.length !== requiredEmbeddingDimensions),
+        reduce((context: WriteContext) => ({
+          ...context,
+          result: writeSkipped(`embedding must have ${requiredEmbeddingDimensions} dimensions`)
+        }))
+      ),
+      immediate("writing")
+    ),
+    writing: invoke(
+      writeCacheEntry,
+      transition(
+        "done",
+        "written",
+        reduce((context: WriteContext, event: DoneEvent<ConversationCacheWriteResult>) => ({
+          ...context,
+          result: event.data
+        }))
+      ),
+      transition(
+        "error",
+        "failed",
+        reduce((context: WriteContext, event: ErrorEvent) => ({
+          ...context,
+          result: writeFailed(errorMessage(event.error))
+        }))
+      )
+    ),
+    skipped: state(),
+    written: state(),
+    failed: state()
+  },
+  (context: WriteContext) => context
+);
+
 export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): SemanticCacheConfig {
   const redisUrl = optionalString(env.REDIS_URL);
   const prefix = optionalString(env.BOOT_SEMANTIC_CACHE_PREFIX) ?? defaultCachePrefix;
@@ -176,7 +250,7 @@ export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): Se
     prefix,
     namespace:
       optionalString(env.BOOT_SEMANTIC_CACHE_NAMESPACE) ??
-      stableHash([env.BOOT_CHAT_MODEL ?? "", env.BOOT_EMBEDDING_MODEL ?? "", conversationCachePolicyVersion]).slice(0, 16),
+      stableHash([env.BOOT_CHAT_MODEL ?? "", fixedBootEmbeddingModel, conversationCachePolicyVersion]).slice(0, 16),
     ttlSeconds: positiveInteger(env.BOOT_SEMANTIC_CACHE_TTL_SECONDS, 86_400, 2_592_000),
     similarityThreshold: boundedNumber(env.BOOT_SEMANTIC_CACHE_THRESHOLD, 0.92, 0.5, 0.99),
     maxCandidates: positiveInteger(env.BOOT_SEMANTIC_CACHE_MAX_CANDIDATES, 8, 50),
@@ -218,60 +292,13 @@ export async function lookupConversationCache(input: {
   });
 }
 
-export async function writeConversationCache(input: {
-  scope: string;
-  contextFingerprint: string;
-  content: string;
-  reply: string;
-  embedding: number[];
-  model: string;
-  metadata: ConversationCacheMetadata;
-  config?: SemanticCacheConfig | undefined;
-}): Promise<ConversationCacheWriteResult> {
+export async function writeConversationCache(input: ConversationCacheWriteInput): Promise<ConversationCacheWriteResult> {
   const config = input.config ?? getSemanticCacheConfig();
-  const normalizedQuery = normalizeCacheQuery(input.content);
-  if (!config.enabled || !config.redisUrl) {
-    return { status: "write_skipped", reason: "semantic cache disabled or REDIS_URL missing" };
-  }
-  if (!isStandaloneCacheCandidate(input.content)) {
-    return { status: "write_skipped", reason: "query is not cacheable" };
-  }
-  if (input.embedding.length !== requiredEmbeddingDimensions) {
-    return { status: "write_skipped", reason: `embedding must have ${requiredEmbeddingDimensions} dimensions` };
-  }
-
-  try {
-    return await withCacheTimeout(async () => {
-      const client = await getRedisClient(config);
-      await ensureVectorIndex(client, config);
-
-      const itemId = stableHash([config.namespace, input.scope, input.contextFingerprint, normalizedQuery, input.model]);
-      const itemKey = cacheItemKey(config, itemId);
-      const exactKey = exactCacheKey(config, input.scope, input.contextFingerprint, normalizedQuery);
-      await client.hSet(itemKey, {
-        scope: input.scope,
-        contextFingerprint: input.contextFingerprint,
-        namespace: config.namespace,
-        normalizedQuery,
-        query: input.content,
-        reply: input.reply,
-        model: input.model,
-        memoryCount: String(nonNegativeInteger(input.metadata.memoryCount)),
-        webSearchResultCount: String(nonNegativeInteger(input.metadata.webSearchResultCount)),
-        webSearchStatus: input.metadata.webSearchStatus,
-        createdAt: new Date().toISOString(),
-        embedding: float32VectorBuffer(input.embedding)
-      });
-      await Promise.all([
-        client.expire(itemKey, config.ttlSeconds),
-        config.l1Enabled ? client.set(exactKey, itemKey, { EX: config.ttlSeconds }) : Promise.resolve(null)
-      ]);
-
-      return { status: "written" };
-    }, config, "write");
-  } catch (error) {
-    return { status: "write_failed", reason: errorMessage(error) };
-  }
+  return runCacheWriteStateMachine({
+    ...input,
+    config,
+    normalizedQuery: normalizeCacheQuery(input.content)
+  });
 }
 
 export async function closeSemanticCache() {
@@ -346,7 +373,7 @@ async function readSemanticCache(context: LookupContext): Promise<ConversationCa
 
   const client = await getRedisClient(context.config);
   await ensureVectorIndex(client, context.config);
-  if (unavailableIndexes.has(context.config.indexName)) {
+  if (unavailableIndexes.has(indexStateKey(context.config))) {
     return null;
   }
 
@@ -471,8 +498,70 @@ function cacheMiss(status: "disabled" | "miss", reason: string | undefined): Con
   return reason ? { status, reason } : { status };
 }
 
+function writeSkipped(reason: string): ConversationCacheWriteResult {
+  return { status: "write_skipped", reason };
+}
+
+function writeFailed(reason: string): ConversationCacheWriteResult {
+  return { status: "write_failed", reason };
+}
+
+function runCacheWriteStateMachine(context: WriteContext) {
+  return new Promise<ConversationCacheWriteResult>((resolve) => {
+    interpret(
+      writeMachine,
+      (service) => {
+        const current = String(service.machine.current);
+        const result = (service.context as WriteContext).result;
+        if ((current === "skipped" || current === "written" || current === "failed") && result) {
+          resolve(result);
+        }
+      },
+      context
+    );
+  });
+}
+
+async function writeCacheEntry(context: WriteContext): Promise<ConversationCacheWriteResult> {
+  return withCacheTimeout(async () => {
+    const client = await getRedisClient(context.config);
+    await ensureVectorIndex(client, context.config);
+
+    const itemId = stableHash([
+      context.config.namespace,
+      context.scope,
+      context.contextFingerprint,
+      context.normalizedQuery,
+      context.model
+    ]);
+    const itemKey = cacheItemKey(context.config, itemId);
+    const exactKey = exactCacheKey(context.config, context.scope, context.contextFingerprint, context.normalizedQuery);
+    await client.hSet(itemKey, {
+      scope: context.scope,
+      contextFingerprint: context.contextFingerprint,
+      namespace: context.config.namespace,
+      normalizedQuery: context.normalizedQuery,
+      query: context.content,
+      reply: context.reply,
+      model: context.model,
+      memoryCount: String(nonNegativeInteger(context.metadata.memoryCount)),
+      webSearchResultCount: String(nonNegativeInteger(context.metadata.webSearchResultCount)),
+      webSearchStatus: context.metadata.webSearchStatus,
+      createdAt: new Date().toISOString(),
+      embedding: float32VectorBuffer(context.embedding)
+    });
+    await Promise.all([
+      client.expire(itemKey, context.config.ttlSeconds),
+      context.config.l1Enabled ? client.set(exactKey, itemKey, { EX: context.config.ttlSeconds }) : Promise.resolve(null)
+    ]);
+
+    return { status: "written" };
+  }, context.config, "write");
+}
+
 async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheConfig) {
-  if (readyIndexes.has(config.indexName) || unavailableIndexes.has(config.indexName)) {
+  const stateKey = indexStateKey(config);
+  if (readyIndexes.has(stateKey) || unavailableIndexes.has(stateKey)) {
     return;
   }
 
@@ -509,20 +598,24 @@ async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheC
       "DISTANCE_METRIC",
       "COSINE"
     ]);
-    readyIndexes.add(config.indexName);
+    readyIndexes.add(stateKey);
   } catch (error) {
     const message = errorMessage(error);
     if (/index already exists/i.test(message)) {
-      readyIndexes.add(config.indexName);
+      readyIndexes.add(stateKey);
       return;
     }
     if (/unknown command|module|redisearch/i.test(message)) {
-      unavailableIndexes.add(config.indexName);
+      unavailableIndexes.add(stateKey);
       return;
     }
 
     throw error;
   }
+}
+
+function indexStateKey(config: SemanticCacheConfig) {
+  return `${config.redisUrl ?? ""}:${config.prefix}:${config.indexName}`;
 }
 
 function validEntry(
@@ -630,7 +723,7 @@ function nonNegativeInteger(value: number) {
 }
 
 function escapeTagValue(value: string) {
-  return value.replace(/([\\,.<>{}\[\]"':;!@#$%^&*()\-=+~\s|])/g, "\\$1");
+  return value.replace(/([\\,.<>{}[\]"':;!@#$%^&*()\-=+~\s|])/g, "\\$1");
 }
 
 function float32VectorBuffer(values: number[]) {

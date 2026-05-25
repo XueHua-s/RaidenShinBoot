@@ -1,7 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { getEffectiveBootConfig } from "@raiden/boot";
-import { countMemories, createMemory, listMemories } from "@raiden/database";
-import { createMemoryRequestSchema, paginationQuerySchema } from "@raiden/shared";
+import { countMemories, createMemory, listMemories, searchMemories } from "@raiden/database";
+import { createMemoryRequestSchema, memorySearchRequestSchema, paginationQuerySchema } from "@raiden/shared";
 import { embedText } from "@raiden/shared/boot";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -10,6 +10,18 @@ import { requirePermission, type AuthVariables } from "../auth.js";
 const memoryQuerySchema = paginationQuerySchema.extend({
   telegramUserId: z.string().optional()
 });
+
+function memoryDto(memory: Awaited<ReturnType<typeof createMemory>>) {
+  return {
+    id: memory.id,
+    telegramUserId: memory.telegramUserId,
+    summary: memory.summary,
+    importance: memory.importance,
+    sourceMessageId: memory.sourceMessageId,
+    createdAt: memory.createdAt.toISOString(),
+    lastAccessedAt: memory.lastAccessedAt?.toISOString() ?? null
+  };
+}
 
 export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/", zValidator("query", memoryQuerySchema), async (c) => {
@@ -22,6 +34,25 @@ export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
 
     return c.json({ data, total });
   })
+  .post("/search", zValidator("json", memorySearchRequestSchema), async (c) => {
+    requirePermission(c, "memory:read");
+    const body = c.req.valid("json");
+    const embedding = await embedText(body.query, await getEffectiveBootConfig());
+    const rows = await searchMemories({
+      telegramUserId: body.telegramUserId,
+      embedding,
+      limit: body.limit,
+      touchLastAccessed: false
+    });
+
+    return c.json({
+      data: rows.map((row) => ({
+        ...row,
+        createdAt: row.createdAt.toISOString(),
+        lastAccessedAt: row.lastAccessedAt?.toISOString() ?? null
+      }))
+    });
+  })
   .post("/", zValidator("json", createMemoryRequestSchema), async (c) => {
     requirePermission(c, "memory:write");
     const body = c.req.valid("json");
@@ -33,5 +64,5 @@ export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
       embedding
     });
 
-    return c.json({ data: memory }, 201);
+    return c.json({ data: memoryDto(memory) }, 201);
   });

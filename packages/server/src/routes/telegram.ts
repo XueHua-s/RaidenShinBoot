@@ -1,6 +1,8 @@
 import { zValidator } from "@hono/zod-validator";
 import {
   countTelegramChats,
+  countTelegramCommandPermissions,
+  deleteTelegramCommandPermission,
   listTelegramChats,
   listTelegramCommandPermissions,
   updateTelegramChat,
@@ -18,6 +20,9 @@ import { requirePermission, writeAuditFromContext, type AuthVariables } from "..
 
 const commandPermissionQuerySchema = paginationQuerySchema.extend({
   chatId: z.string().optional()
+});
+const uuidParamSchema = z.object({
+  id: z.string().uuid()
 });
 
 function snapshot(value: unknown) {
@@ -68,9 +73,10 @@ export const telegramRoute = new Hono<{ Variables: AuthVariables }>()
   .get("/command-permissions", zValidator("query", commandPermissionQuerySchema), async (c) => {
     requirePermission(c, "telegram:read");
     const query = c.req.valid("query");
-    const data = await listTelegramCommandPermissions(query.chatId ? { ...query, chatId: query.chatId } : query);
+    const input = query.chatId ? { ...query, chatId: query.chatId } : query;
+    const [data, total] = await Promise.all([listTelegramCommandPermissions(input), countTelegramCommandPermissions(input)]);
 
-    return c.json({ data, total: data.length });
+    return c.json({ data, total });
   })
   .put("/command-permissions", zValidator("json", upsertTelegramCommandPermissionRequestSchema), async (c) => {
     requirePermission(c, "telegram:moderate");
@@ -86,6 +92,23 @@ export const telegramRoute = new Hono<{ Variables: AuthVariables }>()
       targetType: "telegram_command_permission",
       targetId: permission.id,
       after: snapshot(permission)
+    });
+
+    return c.json({ data: permission });
+  })
+  .delete("/command-permissions/:id", zValidator("param", uuidParamSchema), async (c) => {
+    requirePermission(c, "telegram:moderate");
+    const { id } = c.req.valid("param");
+    const permission = await deleteTelegramCommandPermission(id);
+    if (!permission) {
+      throw new HTTPException(404, { message: "Telegram command permission not found" });
+    }
+
+    await writeAuditFromContext(c, {
+      action: "telegram_command_permission.delete",
+      targetType: "telegram_command_permission",
+      targetId: permission.id,
+      before: snapshot(permission)
     });
 
     return c.json({ data: permission });

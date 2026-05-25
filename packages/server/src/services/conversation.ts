@@ -8,6 +8,7 @@ export type ConversationInput = {
   languageCode?: string | null;
   content: string;
   telegramMessageId?: number | null;
+  actorId?: string | null;
 };
 
 export async function handleConversation(input: ConversationInput) {
@@ -19,6 +20,10 @@ export async function handleConversation(input: ConversationInput) {
     lastName: input.lastName ?? null,
     languageCode: input.languageCode ?? null,
     sourceMessageId: input.telegramMessageId ?? null,
-    content: input.content
+    content: input.content,
+    toolPermission: {
+      actorId: input.actorId ?? null,
+      chatId: null
+    }
   });
 }

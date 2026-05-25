@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: raiden
+          POSTGRES_PASSWORD: raiden
+          POSTGRES_DB: raiden_shin_boot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U raiden -d raiden_shin_boot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis/redis-stack-server:7.4.0-v8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://raiden:raiden@localhost:5432/raiden_shin_boot
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm db:migrate
+
+      - run: cp .env.example .env && docker compose --profile app --profile bot --profile worker config
+
+      - run: pnpm run lint:code
+
+      - if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+
+      - if: github.event_name == 'pull_request'
+        run: pnpm exec commitlint --from "${{ github.event.pull_request.base.sha }}" --to HEAD --verbose
+
+      - run: pnpm run check
+
+      - run: pnpm run test
+
+      - run: pnpm build

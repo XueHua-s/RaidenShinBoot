@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useState } from "react";
-import { Save, Search, Settings2 } from "lucide-react";
-import type { RuntimeSettings, SystemStatus } from "@raiden/shared";
+import { RefreshCw, Save, Search, Settings2 } from "lucide-react";
+import type { AdminUserDto, ChatModelListResponse, RuntimeSettings, SystemStatus, UpdateRuntimeSettingsRequest } from "@raiden/shared";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card.js";
@@ -73,6 +73,54 @@ function settingsToForm(settings: RuntimeSettings): RuntimeSettingsForm {
   };
 }
 
+function optionalText(value: string | null) {
+  return value || null;
+}
+
+function buildRuntimeSettingsPatch(input: {
+  form: RuntimeSettingsForm;
+  secretClears: Record<RuntimeSecretKey, boolean>;
+  secretValues: Record<RuntimeSecretKey, string>;
+  settings: RuntimeSettings;
+}): Partial<UpdateRuntimeSettingsRequest> {
+  const { form, secretClears, secretValues, settings } = input;
+  const patch: Partial<UpdateRuntimeSettingsRequest> = {};
+
+  const assignIfChanged = <Key extends keyof UpdateRuntimeSettingsRequest>(
+    key: Key,
+    value: UpdateRuntimeSettingsRequest[Key],
+    current: UpdateRuntimeSettingsRequest[Key]
+  ) => {
+    if (value !== current) {
+      patch[key] = value;
+    }
+  };
+
+  assignIfChanged("gatewayPreset", form.gatewayPreset, settings.gatewayPreset);
+  assignIfChanged("bootBaseUrl", form.bootBaseUrl, settings.bootBaseUrl);
+  assignIfChanged("bootChatBaseUrl", optionalText(form.bootChatBaseUrl), settings.bootChatBaseUrl);
+  assignIfChanged("bootEmbeddingBaseUrl", optionalText(form.bootEmbeddingBaseUrl), settings.bootEmbeddingBaseUrl);
+  assignIfChanged("bootImageBaseUrl", optionalText(form.bootImageBaseUrl), settings.bootImageBaseUrl);
+  assignIfChanged("bootSearchBaseUrl", optionalText(form.bootSearchBaseUrl), settings.bootSearchBaseUrl);
+  assignIfChanged("bootWikipediaApiUrl", form.bootWikipediaApiUrl, settings.bootWikipediaApiUrl);
+  assignIfChanged("bootMoegirlApiUrl", form.bootMoegirlApiUrl, settings.bootMoegirlApiUrl);
+  assignIfChanged("bootChatModel", form.bootChatModel, settings.bootChatModel);
+  assignIfChanged("bootSearchProvider", form.bootSearchProvider, settings.bootSearchProvider);
+  assignIfChanged("bootSearchMaxResults", form.bootSearchMaxResults, settings.bootSearchMaxResults);
+  assignIfChanged("bootSearchDepth", form.bootSearchDepth, settings.bootSearchDepth);
+
+  for (const [key] of runtimeSecretLabels) {
+    const secretValue = secretValues[key].trim();
+    if (secretClears[key]) {
+      patch[key] = null;
+    } else if (secretValue) {
+      patch[key] = secretValue;
+    }
+  }
+
+  return patch;
+}
+
 type RuntimeSettingsDraft = {
   form: RuntimeSettingsForm | null;
   secretValues: Record<RuntimeSecretKey, string>;
@@ -111,18 +159,36 @@ function runtimeSettingsDraftReducer(state: RuntimeSettingsDraft, action: Runtim
   return { ...state, secretClears: { ...state.secretClears, [action.key]: action.value } };
 }
 
-export function SystemPage() {
+export function SystemPage({ user }: { user: AdminUserDto }) {
   const { t, formatStatus, formatSearchProvider, formatDepth } = useI18n();
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
+  const [chatModels, setChatModels] = useState<ChatModelListResponse | null>(null);
+  const [chatModelsLoading, setChatModelsLoading] = useState(false);
+  const [chatModelsError, setChatModelsError] = useState<string | null>(null);
   const [draft, dispatchDraft] = useReducer(runtimeSettingsDraftReducer, initialRuntimeSettingsDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const { form, secretValues, secretClears } = draft;
+  const canWriteSystem = user.role === "super_admin";
 
   const updateForm = useCallback((patch: Partial<RuntimeSettingsForm>) => {
     dispatchDraft({ type: "updateForm", patch });
+  }, []);
+
+  const loadChatModels = useCallback(async () => {
+    setChatModelsLoading(true);
+    setChatModelsError(null);
+    try {
+      const response = await apiClient.api.system.models.chat.$get();
+      setChatModels(await readJson<ChatModelListResponse>(response));
+    } catch (requestError) {
+      setChatModels(null);
+      setChatModelsError(errorMessage(requestError));
+    } finally {
+      setChatModelsLoading(false);
+    }
   }, []);
 
   const load = useCallback(async () => {
@@ -147,7 +213,8 @@ export function SystemPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadChatModels();
+  }, [load, loadChatModels]);
 
   const rows = useMemo(
     () => [
@@ -164,10 +231,9 @@ export function SystemPage() {
     ],
     [formatSearchProvider, formatStatus, system, t]
   );
-
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!form) {
+    if (!form || !settings || !canWriteSystem) {
       return;
     }
 
@@ -175,30 +241,21 @@ export function SystemPage() {
     setError(null);
     setNotice(null);
     try {
-      const secretPatch = runtimeSecretLabels.reduce<Record<string, string | null>>((accumulator, [key]) => {
-        if (secretClears[key]) {
-          accumulator[key] = null;
-        } else if (secretValues[key].trim()) {
-          accumulator[key] = secretValues[key].trim();
-        }
-        return accumulator;
-      }, {});
+      const patch = buildRuntimeSettingsPatch({ form, secretClears, secretValues, settings });
+      if (Object.keys(patch).length === 0) {
+        dispatchDraft({ type: "reset", settings });
+        setNotice(t("system.settingsSaved"));
+        return;
+      }
+
       const response = await apiClient.api.system.settings.$patch({
-        json: {
-          ...form,
-          bootChatBaseUrl: form.bootChatBaseUrl || null,
-          bootEmbeddingBaseUrl: form.bootEmbeddingBaseUrl || null,
-          bootImageBaseUrl: form.bootImageBaseUrl || null,
-          bootSearchBaseUrl: form.bootSearchBaseUrl || null,
-          bootWikipediaApiUrl: form.bootWikipediaApiUrl,
-          bootMoegirlApiUrl: form.bootMoegirlApiUrl,
-          ...secretPatch
-        }
+        json: patch
       });
       const payload = await readJson<{ data: RuntimeSettings }>(response);
       setSettings(payload.data);
       dispatchDraft({ type: "reset", settings: payload.data });
       await load();
+      await loadChatModels();
       setNotice(t("system.settingsSaved"));
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -208,7 +265,15 @@ export function SystemPage() {
   }
 
   return (
-    <ResourcePage title={t("system.title")} description={t("system.description")} error={error} loading={!system && !error} onRefresh={load}>
+    <ResourcePage
+      title={t("system.title")}
+      description={t("system.description")}
+      error={error}
+      loading={!system && !error}
+      onRefresh={async () => {
+        await Promise.all([load(), loadChatModels()]);
+      }}
+    >
       {notice && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
           {notice}
@@ -236,9 +301,20 @@ export function SystemPage() {
           </CardHeader>
           <CardContent>
             <form className="grid gap-5" onSubmit={saveSettings}>
-              <GatewayPresetSection form={form} t={t} updateForm={updateForm} />
-              <EndpointAndModelSections form={form} settings={settings} t={t} updateForm={updateForm} />
+              <GatewayPresetSection canWriteSystem={canWriteSystem} form={form} t={t} updateForm={updateForm} />
+              <EndpointAndModelSections
+                canWriteSystem={canWriteSystem}
+                chatModels={chatModels}
+                chatModelsError={chatModelsError}
+                chatModelsLoading={chatModelsLoading}
+                form={form}
+                settings={settings}
+                t={t}
+                updateForm={updateForm}
+                onRefreshChatModels={loadChatModels}
+              />
               <SearchAndSecretSections
+                canWriteSystem={canWriteSystem}
                 form={form}
                 formatDepth={formatDepth}
                 formatSearchProvider={formatSearchProvider}
@@ -252,10 +328,13 @@ export function SystemPage() {
               />
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4">
                 <p className="text-xs leading-5 text-zinc-500">{t("system.auditHint")}</p>
-                <Button disabled={saving || !form.bootBaseUrl.trim()} type="submit">
-                  <Save className="size-4" />
-                  {saving ? t("common.saving") : t("common.save")}
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {!canWriteSystem && <Badge tone="warning">{t("common.readOnly")}</Badge>}
+                  <Button disabled={!canWriteSystem || saving || !form.bootBaseUrl.trim()} type="submit">
+                    <Save className="size-4" />
+                    {saving ? t("common.saving") : t("common.save")}
+                  </Button>
+                </div>
               </div>
             </form>
           </CardContent>
@@ -266,10 +345,12 @@ export function SystemPage() {
 }
 
 function GatewayPresetSection({
+  canWriteSystem,
   form,
   t,
   updateForm
 }: {
+  canWriteSystem: boolean;
   form: RuntimeSettingsForm;
   t: I18nContextValue["t"];
   updateForm: (patch: Partial<RuntimeSettingsForm>) => void;
@@ -291,8 +372,10 @@ function GatewayPresetSection({
           <button
             className={cn(
               "h-10 rounded-md text-sm font-semibold transition",
-              form.gatewayPreset === value ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-600 hover:bg-white"
+              form.gatewayPreset === value ? "bg-zinc-950 text-white shadow-sm" : "text-zinc-600 hover:bg-white",
+              !canWriteSystem && "cursor-not-allowed opacity-60"
             )}
+            disabled={!canWriteSystem}
             key={value}
             type="button"
             onClick={() => updateForm({ gatewayPreset: value as RuntimeSettings["gatewayPreset"] })}
@@ -306,16 +389,29 @@ function GatewayPresetSection({
 }
 
 function EndpointAndModelSections({
+  canWriteSystem,
+  chatModels,
+  chatModelsError,
+  chatModelsLoading,
   form,
   settings,
   t,
-  updateForm
+  updateForm,
+  onRefreshChatModels
 }: {
+  canWriteSystem: boolean;
+  chatModels: ChatModelListResponse | null;
+  chatModelsError: string | null;
+  chatModelsLoading: boolean;
   form: RuntimeSettingsForm;
   settings: RuntimeSettings;
   t: I18nContextValue["t"];
   updateForm: (patch: Partial<RuntimeSettingsForm>) => void;
+  onRefreshChatModels: () => void | Promise<void>;
 }) {
+  const chatModelIds = chatModels?.models.map((model) => model.id) ?? [];
+  const invalidCurrentModel = chatModelIds.length > 0 && !chatModelIds.includes(form.bootChatModel);
+
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <div className="grid gap-3 rounded-lg border border-zinc-200 p-4">
@@ -326,6 +422,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.defaultBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootBaseUrl}
             onChange={(event) => updateForm({ bootBaseUrl: event.target.value })}
             placeholder="https://new-api.example.com/v1"
@@ -334,6 +431,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.chatBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootChatBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootChatBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -342,6 +440,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.embeddingBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootEmbeddingBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootEmbeddingBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -350,6 +449,7 @@ function EndpointAndModelSections({
         <Label>
           {t("system.imageBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootImageBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootImageBaseUrl: event.target.value || null })}
             placeholder={t("system.fallbackDefault")}
@@ -362,17 +462,49 @@ function EndpointAndModelSections({
           <h3 className="text-sm font-semibold text-zinc-950">{t("system.modelMapping")}</h3>
           <p className="mt-1 text-xs leading-5 text-zinc-500">{t("system.modelHelp")}</p>
         </div>
-        <Label>
-          {t("system.chatModel")}
-          <Input value={form.bootChatModel} onChange={(event) => updateForm({ bootChatModel: event.target.value })} />
-        </Label>
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-zinc-700">{t("system.chatModel")}</span>
+            <Button disabled={chatModelsLoading} size="sm" type="button" variant="outline" onClick={onRefreshChatModels}>
+              <RefreshCw className={cn("size-3.5", chatModelsLoading && "animate-spin")} />
+              {t("common.refresh")}
+            </Button>
+          </div>
+          <Input
+            disabled={!canWriteSystem}
+            list="chat-model-options"
+            value={form.bootChatModel}
+            onChange={(event) => updateForm({ bootChatModel: event.target.value })}
+          />
+          {chatModelIds.length > 0 && (
+            <datalist id="chat-model-options">
+              {chatModelIds.map((modelId) => (
+                <option key={modelId} value={modelId} />
+              ))}
+            </datalist>
+          )}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
+              {chatModelsError
+                ? t("system.modelListUnavailable")
+                : chatModelsLoading
+                  ? t("common.checking")
+                  : t("system.modelListLoaded", { count: chatModels?.models.length ?? 0 })}
+            </Badge>
+            {invalidCurrentModel && <Badge tone="warning">{t("system.currentModelMustChange")}</Badge>}
+            {chatModelsError && <span className="min-w-0 truncate">{chatModelsError}</span>}
+            {chatModels?.source && <span className="min-w-0 truncate" title={chatModels.source}>{chatModels.source}</span>}
+          </div>
+        </div>
         <Label>
           {t("system.embeddingModel")}
-          <Input value={form.bootEmbeddingModel} onChange={(event) => updateForm({ bootEmbeddingModel: event.target.value })} />
+          <Input disabled={!canWriteSystem} readOnly value={form.bootEmbeddingModel} />
+          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <Label>
           {t("system.imageModel")}
-          <Input value={form.bootImageModel} onChange={(event) => updateForm({ bootImageModel: event.target.value })} />
+          <Input disabled={!canWriteSystem} readOnly value={form.bootImageModel} />
+          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
         </Label>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -392,6 +524,7 @@ function EndpointAndModelSections({
 }
 
 function SearchAndSecretSections({
+  canWriteSystem,
   form,
   formatDepth,
   formatSearchProvider,
@@ -403,6 +536,7 @@ function SearchAndSecretSections({
   updateForm,
   dispatchDraft
 }: {
+  canWriteSystem: boolean;
   form: RuntimeSettingsForm;
   formatDepth: I18nContextValue["formatDepth"];
   formatSearchProvider: I18nContextValue["formatSearchProvider"];
@@ -428,6 +562,7 @@ function SearchAndSecretSections({
           {t("system.provider")}
           <select
             className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+            disabled={!canWriteSystem}
             value={form.bootSearchProvider}
             onChange={(event) => updateForm({ bootSearchProvider: event.target.value as RuntimeSettings["bootSearchProvider"] })}
           >
@@ -440,6 +575,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.searchBaseUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootSearchBaseUrl ?? ""}
             onChange={(event) => updateForm({ bootSearchBaseUrl: event.target.value || null })}
             placeholder={t("system.providerDefault")}
@@ -448,6 +584,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.wikipediaApiUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootWikipediaApiUrl}
             onChange={(event) => updateForm({ bootWikipediaApiUrl: event.target.value })}
             placeholder="https://zh.wikipedia.org/w/api.php"
@@ -456,6 +593,7 @@ function SearchAndSecretSections({
         <Label>
           {t("system.moegirlApiUrl")}
           <Input
+            disabled={!canWriteSystem}
             value={form.bootMoegirlApiUrl}
             onChange={(event) => updateForm({ bootMoegirlApiUrl: event.target.value })}
             placeholder="https://zh.moegirl.org.cn/api.php"
@@ -465,6 +603,7 @@ function SearchAndSecretSections({
           <Label>
             {t("system.maxResults")}
             <Input
+              disabled={!canWriteSystem}
               max={10}
               min={1}
               type="number"
@@ -476,6 +615,7 @@ function SearchAndSecretSections({
             {t("system.depth")}
             <select
               className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+              disabled={!canWriteSystem}
               value={form.bootSearchDepth}
               onChange={(event) => updateForm({ bootSearchDepth: event.target.value as RuntimeSettings["bootSearchDepth"] })}
             >
@@ -508,7 +648,7 @@ function SearchAndSecretSections({
               <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                 <Input
                   autoComplete="off"
-                  disabled={secretClears[key]}
+                  disabled={!canWriteSystem || secretClears[key]}
                   placeholder={settings.secrets[key] ? t("common.keepSecret") : t("common.pasteSecret")}
                   type="password"
                   value={secretValues[key]}
@@ -518,6 +658,7 @@ function SearchAndSecretSections({
                   <input
                     checked={secretClears[key]}
                     className="size-4 accent-cyan-600"
+                    disabled={!canWriteSystem}
                     type="checkbox"
                     onChange={(event) => dispatchDraft({ type: "setSecretClear", key, value: event.target.checked })}
                   />

@@ -21,11 +21,13 @@ import {
   listMemories,
   resolveTelegramChatAccess,
   updateTelegramChat,
+  upsertTelegramCommandPermission,
   upsertRuntimeSetting
 } from "@raiden/database";
 import { app } from "@raiden/server/app";
 import { hashPassword } from "@raiden/server/auth";
 import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
+import { planMakotoToolUse } from "@raiden/shared/boot";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
@@ -140,6 +142,9 @@ async function main() {
   if (isStandaloneCacheCandidate("继续说刚才那件事")) {
     throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
   }
+  if (isStandaloneCacheCandidate("请生成一张稻妻樱花头像")) {
+    throw new Error("Explicit image-generation prompts must not be semantic-cache candidates");
+  }
   for (const memoryMutationPrompt of ["请记住我喜欢苹果", "我的名字是小雪", "I like dango milk, please remember that"]) {
     if (isStandaloneCacheCandidate(memoryMutationPrompt)) {
       throw new Error(`Memory/profile mutation prompt should not be a semantic-cache candidate: ${memoryMutationPrompt}`);
@@ -148,11 +153,41 @@ async function main() {
   if (!isStandaloneCacheCandidate("请温柔地说明这次验证链路")) {
     throw new Error("Standalone non-search prompts should be semantic-cache candidates");
   }
+  const plannerSearchDecision = await planMakotoToolUse({
+    content: "E2E_PLANNER_WEB_ACTION ordinary planner passthrough"
+  });
+  if (plannerSearchDecision.action !== "web_search" || plannerSearchDecision.query !== "planner supplied search query") {
+    throw new Error(`Planner web_search decisions should pass through without regex denial, got ${plannerSearchDecision.action}`);
+  }
+  const plannerImageDecision = await planMakotoToolUse({
+    content: "E2E_PLANNER_IMAGE_ACTION ordinary planner passthrough"
+  });
+  if (plannerImageDecision.action !== "makoto_image" || plannerImageDecision.prompt !== "planner supplied image prompt") {
+    throw new Error(`Planner makoto_image decisions should pass through without regex denial, got ${plannerImageDecision.action}`);
+  }
+  const validNoneSearchDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_SEARCH 请联网搜索 RaidenShinBoot 工具架构。"
+  });
+  if (validNoneSearchDecision.action !== "web_search") {
+    throw new Error(`Explicit search intent should override valid planner none, got ${validNoneSearchDecision.action}`);
+  }
+  const validNoneImageDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_IMAGE 请生成一张稻妻樱花头像。"
+  });
+  if (validNoneImageDecision.action !== "makoto_image") {
+    throw new Error(`Explicit image intent should override valid planner none, got ${validNoneImageDecision.action}`);
+  }
+  const validNoneNonImageDecision = await planMakotoToolUse({
+    content: "E2E_VALID_NONE_NON_IMAGE 请帮我画重点总结这段文字。"
+  });
+  if (validNoneNonImageDecision.action !== "none") {
+    throw new Error(`Non-image writing intent should remain none after valid planner none, got ${validNoneNonImageDecision.action}`);
+  }
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
-    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from admin_users where username = ${adminUsername}`;
 
     await createAdminUser({
@@ -206,6 +241,9 @@ async function main() {
       return response.json() as Promise<{
         data: {
           bootBaseUrl?: string;
+          bootChatBaseUrl?: string | null;
+          bootEmbeddingModel?: string;
+          bootImageModel?: string;
           bootSearchProvider?: string;
           secrets?: Record<string, boolean>;
         };
@@ -308,8 +346,6 @@ async function main() {
       bootEmbeddingBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootImageBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootChatModel: "mock-chat",
-      bootEmbeddingModel: "mock-embedding",
-      bootImageModel: "mock-image",
       bootSearchProvider: "tavily",
       bootSearchBaseUrl: `http://127.0.0.1:${port}`,
       bootWikipediaApiUrl: `http://127.0.0.1:${port}/wiki/api.php`,
@@ -321,11 +357,26 @@ async function main() {
     });
     if (
       runtimeSettings.data.bootBaseUrl !== `http://127.0.0.1:${port}/v1` ||
+      runtimeSettings.data.bootEmbeddingModel !== "text-embedding-3-large" ||
+      runtimeSettings.data.bootImageModel !== "chatgpt-image-latest" ||
       runtimeSettings.data.bootSearchProvider !== "tavily" ||
       !runtimeSettings.data.secrets?.bootApiKey ||
       !runtimeSettings.data.secrets.bootSearchApiKey
     ) {
       throw new Error("Runtime settings did not persist new-api relay and secret status");
+    }
+
+    const isolatedChatBasePatch = await patchRuntimeSettings({
+      bootChatBaseUrl: "http://127.0.0.1:1/v1"
+    });
+    if (isolatedChatBasePatch.data.bootChatBaseUrl !== "http://127.0.0.1:1/v1") {
+      throw new Error("Runtime settings should allow chat base URL updates without probing the unchanged chat model");
+    }
+    const restoredChatBasePatch = await patchRuntimeSettings({
+      bootChatBaseUrl: `http://127.0.0.1:${port}/v1`
+    });
+    if (restoredChatBasePatch.data.bootChatBaseUrl !== `http://127.0.0.1:${port}/v1`) {
+      throw new Error("Runtime settings did not restore the chat base URL after isolated patch validation");
     }
 
     const failedAtomicSettingsResponse = await (async () => {
@@ -436,12 +487,50 @@ async function main() {
           username: "e2e_bot_user",
           language_code: "zh"
         },
+        chat: { id: -1009876543210, type: "supergroup" },
         message: { message_id: 42 }
       } as never,
       "我是 bot 路径里的小雪，也喜欢团子牛奶。请记住。"
     );
     if (!firstBotResult.reply) {
       throw new Error("First bot conversation core returned an empty reply");
+    }
+    const duplicateBotResult = await replyAsMakoto(
+      {
+        from: {
+          id: botUserNumericId,
+          is_bot: false,
+          first_name: "E2E",
+          username: "e2e_bot_user",
+          language_code: "zh"
+        },
+        chat: { id: -1009876543210, type: "supergroup" },
+        message: { message_id: 42 }
+      } as never,
+      "我是 bot 路径里的小雪，也喜欢团子牛奶。请记住。"
+    );
+    if (
+      duplicateBotResult.userMessageId !== firstBotResult.userMessageId ||
+      duplicateBotResult.assistantMessageId !== firstBotResult.assistantMessageId
+    ) {
+      throw new Error("Duplicate Telegram message_id should reuse the saved conversation turn");
+    }
+    const differentChatSameTelegramMessageId = await replyAsMakoto(
+      {
+        from: {
+          id: botUserNumericId,
+          is_bot: false,
+          first_name: "E2E",
+          username: "e2e_bot_user",
+          language_code: "zh"
+        },
+        chat: { id: -1009876543211, type: "supergroup" },
+        message: { message_id: 42 }
+      } as never,
+      "同一个 Telegram message_id 但来自不同 chat，应该保存为独立轮次。"
+    );
+    if (differentChatSameTelegramMessageId.userMessageId === firstBotResult.userMessageId) {
+      throw new Error("Same Telegram message_id from a different chat must not reuse the first chat's turn");
     }
 
     const botMemories = await listMemories({ telegramUserId: botTelegramUserId, limit: 5, offset: 0 });
@@ -458,6 +547,7 @@ async function main() {
           username: "e2e_bot_user",
           language_code: "zh"
         },
+        chat: { id: -1009876543210, type: "supergroup" },
         message: { message_id: 43 }
       } as never,
       "你对我有什么印象？"
@@ -511,6 +601,82 @@ async function main() {
     });
     if (!scopedCommandOverrideAccess.allowed) {
       throw new Error("Chat-scoped Telegram command permission should override the global rule");
+    }
+    const modelCommandRuleResponse = await authedRequest("/api/telegram/command-permissions", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatId: null, command: "model", enabled: false })
+    });
+    if (modelCommandRuleResponse.status !== 400) {
+      throw new Error(`Reserved /model command permission should be rejected, got ${modelCommandRuleResponse.status}`);
+    }
+    const slashModelCommandRuleResponse = await authedRequest("/api/telegram/command-permissions", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatId: null, command: "/model", enabled: false })
+    });
+    if (slashModelCommandRuleResponse.status !== 400) {
+      throw new Error(`Reserved /model command permission with leading slash should be rejected, got ${slashModelCommandRuleResponse.status}`);
+    }
+    const repositoryRejectedModelCommand = await (async () => {
+      try {
+        await upsertTelegramCommandPermission({ chatId: null, command: "model", enabled: false });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!repositoryRejectedModelCommand) {
+      throw new Error("Repository should reject reserved /model command permission writes");
+    }
+    const repositoryRejectedSlashModelCommand = await (async () => {
+      try {
+        await upsertTelegramCommandPermission({ chatId: null, command: "/model", enabled: false });
+        return false;
+      } catch {
+        return true;
+      }
+    })();
+    if (!repositoryRejectedSlashModelCommand) {
+      throw new Error("Repository should reject reserved /model command permission writes with leading slash");
+    }
+    const modelCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "model"
+    });
+    if (!modelCommandAccess.allowed) {
+      throw new Error("Hidden /model command should remain readable for approved chats when no permission rule exists");
+    }
+    const slashModelCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "/model"
+    });
+    if (!slashModelCommandAccess.allowed) {
+      throw new Error("Hidden /model command access should normalize a leading slash");
+    }
+    const scopedPermission = (await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true })) as {
+      data: { id: string };
+    };
+    const deleteScopedPermissionResponse = await authedRequest(`/api/telegram/command-permissions/${scopedPermission.data.id}`, {
+      method: "DELETE"
+    });
+    if (!deleteScopedPermissionResponse.ok) {
+      throw new Error(
+        `Telegram command permission delete failed with ${deleteScopedPermissionResponse.status}: ${await deleteScopedPermissionResponse.text()}`
+      );
+    }
+    const resetScopedCommandAccess = await resolveTelegramChatAccess({
+      chatId: "-1001234567890",
+      type: "supergroup",
+      title: "E2E Pending Group",
+      command: "start"
+    });
+    if (resetScopedCommandAccess.allowed || resetScopedCommandAccess.reason !== "command_disabled") {
+      throw new Error("Deleting chat-scoped Telegram command permission should restore global inheritance");
     }
 
     const toolsResponse = await authedRequest("/api/search/tools");
@@ -757,6 +923,37 @@ async function main() {
     if (!relayState.imagePrompts.some((prompt) => prompt.includes("稻妻夜色") && prompt.includes("Raiden Makoto"))) {
       throw new Error("Image prompt did not include the user request and Makoto visual guidance");
     }
+    const autonomousImagePromptCountBefore = relayState.imagePrompts.length;
+    const autonomousImageChat = await authedRequest("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        telegramUserId: apiTelegramUserId,
+        content: "E2E_CHAT_AUTONOMOUS_IMAGE ordinary planner-selected visual request"
+      })
+    });
+    if (!autonomousImageChat.ok) {
+      throw new Error(`Autonomous image chat failed with ${autonomousImageChat.status}: ${await autonomousImageChat.text()}`);
+    }
+    const autonomousImagePayload = (await autonomousImageChat.json()) as {
+      images?: Array<{ base64?: string; mediaType?: string }>;
+      toolDecision?: { action?: string };
+      toolStatus?: { name?: string | null; status?: string };
+    };
+    if (
+      autonomousImagePayload.toolDecision?.action !== "makoto_image" ||
+      autonomousImagePayload.toolStatus?.name !== "makoto_image" ||
+      autonomousImagePayload.toolStatus.status !== "completed" ||
+      !autonomousImagePayload.images?.[0]?.base64
+    ) {
+      throw new Error("Autonomous image chat did not execute makoto_image and return an image");
+    }
+    if (
+      relayState.imagePrompts.length <= autonomousImagePromptCountBefore ||
+      !relayState.imagePrompts.some((prompt) => prompt.includes("自主生图画面") && prompt.includes("Raiden Makoto"))
+    ) {
+      throw new Error("Autonomous image chat did not rewrite and send the image prompt");
+    }
 
     const semanticCacheSmoke = await (async () => {
       if (!process.env.REDIS_URL?.trim()) {
@@ -777,21 +974,25 @@ async function main() {
           username: "e2e_cache_user",
           content: "请温柔地说明这次验证链路"
         };
-        const chatPromptCountBefore = relayState.chatPrompts.length;
         const firstCacheChat = await runBootConversation(cacheInput);
         if (firstCacheChat.cacheStatus !== "miss") {
           throw new Error(`Semantic cache first chat should miss, got ${firstCacheChat.cacheStatus}`);
         }
         await waitForConversationExactCacheHit(cacheInput);
+        const chatPromptCountAfterFirstCacheChat = relayState.chatPrompts.length;
+        const cacheQueryEmbeddingCountAfterFirst = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
 
         const secondCacheChat = await runBootConversation(cacheInput);
         if (secondCacheChat.cacheStatus !== "l1_hit") {
           throw new Error(`Semantic cache second chat should hit L1, got ${secondCacheChat.cacheStatus}`);
         }
-        if (relayState.chatPrompts.length !== chatPromptCountBefore + 1) {
+        if (relayState.chatPrompts.length !== chatPromptCountAfterFirstCacheChat) {
           throw new Error("Semantic cache hit should not call the chat model again");
         }
-        await waitForConversationExactCacheHit(cacheInput);
+        const cacheQueryEmbeddingCountAfterSecond = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
+        if (cacheQueryEmbeddingCountAfterSecond !== cacheQueryEmbeddingCountAfterFirst) {
+          throw new Error("L1 semantic cache hit should not refresh cache through a new query embedding");
+        }
 
         return { skipped: false as const, first: firstCacheChat.cacheStatus, second: secondCacheChat.cacheStatus };
       } finally {
@@ -810,6 +1011,9 @@ async function main() {
           apiFirstMemoryCount: firstPayload.memoryCount,
           apiRecallMemoryCount: secondPayload.memoryCount,
           botRecallMemoryCount: secondBotResult.memoryCount,
+          duplicateTelegramMessageReusedTurn: duplicateBotResult.userMessageId === firstBotResult.userMessageId,
+          sameMessageIdDifferentChatSavedSeparately:
+            differentChatSameTelegramMessageId.userMessageId !== firstBotResult.userMessageId,
           apiRecallReplyPreview: secondPayload.reply.slice(0, 80),
           botRecallReplyPreview: secondBotResult.reply.slice(0, 80),
           apiMemoryCount: apiMemories.length,
@@ -833,6 +1037,8 @@ async function main() {
           approvedGroupAllowed: approvedGroupAccess.allowed,
           globalCommandBlocked: !globallyBlockedCommandAccess.allowed,
           scopedCommandOverrideAllowed: scopedCommandOverrideAccess.allowed,
+          modelCommandReadableForApprovedChat: modelCommandAccess.allowed,
+          scopedCommandResetBlocked: !resetScopedCommandAccess.allowed,
           mockRelayBaseUrl: process.env.BOOT_BASE_URL
         },
         null,
@@ -841,7 +1047,7 @@ async function main() {
     );
   } finally {
     await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
-    await sql`delete from telegram_command_permissions where command = 'start' and (chat_id is null or chat_id = '-1001234567890')`;
+    await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));

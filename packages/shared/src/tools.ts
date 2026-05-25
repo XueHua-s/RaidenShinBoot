@@ -262,10 +262,15 @@ export function searchBootTools(input: BootToolSearchRequest): BootToolSearchRes
       .split(",")
       .map((name) => name.trim().toLowerCase())
       .filter(Boolean);
-    const selected = requested
-      .map((name) => tools.find((tool) => tool.name.toLowerCase() === name))
-      .filter((tool): tool is (typeof tools)[number] => tool !== undefined)
-      .filter((tool, index, selectedTools) => selectedTools.findIndex((item) => item.name === tool.name) === index);
+    const seen = new Set<string>();
+    const selected = requested.flatMap((name) => {
+      const tool = tools.find((candidate) => candidate.name.toLowerCase() === name);
+      if (!tool || seen.has(tool.name)) {
+        return [];
+      }
+      seen.add(tool.name);
+      return [tool];
+    });
     const matches = selected
       .slice(0, maxResults)
       .map((tool) => ({ ...toBootToolDescriptor(tool), score: 100 }));
@@ -296,7 +301,7 @@ export function searchBootTools(input: BootToolSearchRequest): BootToolSearchRes
       return score > 0 ? { ...toBootToolDescriptor(tool), score } : null;
     })
     .filter((tool): tool is BootToolDescriptor & { score: number } => tool !== null)
-    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
     .slice(0, maxResults);
 
   return bootToolSearchResponseSchema.parse({

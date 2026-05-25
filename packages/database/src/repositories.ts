@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, notInArray, or, sql } from "drizzle-orm";
 import { getDatabase } from "./client.js";
 import {
   adminSessions,
@@ -49,10 +49,23 @@ export type RuntimeSettingsChangeSet = {
   upserts?: NewRuntimeSetting[];
 };
 
+export type AuditLogInput = {
+  actorAdminId?: string | null;
+  action: string;
+  targetType: string;
+  targetId?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
 const defaultPagination = {
   limit: 20,
   offset: 0
 };
+const reservedTelegramCommandNames = new Set(["model"]);
+const hiddenTelegramCommandNames = [...reservedTelegramCommandNames, "/model"];
 
 const encryptedValuePrefix = "aes-256-gcm:v1";
 
@@ -352,16 +365,7 @@ export async function countAdminSessions() {
   return row?.count ?? 0;
 }
 
-export async function createAuditLog(input: {
-  actorAdminId?: string | null;
-  action: string;
-  targetType: string;
-  targetId?: string | null;
-  before?: Record<string, unknown> | null;
-  after?: Record<string, unknown> | null;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-}) {
+export async function createAuditLog(input: AuditLogInput) {
   const db = getDatabase();
   const [row] = await db
     .insert(auditLogs)
@@ -475,6 +479,54 @@ export async function applyRuntimeSettingsChanges(input: RuntimeSettingsChangeSe
             updatedAt: new Date()
           }
         });
+    }
+  });
+}
+
+export async function applyRuntimeSettingsChangesWithAudit(input: {
+  changes: RuntimeSettingsChangeSet;
+  audit: AuditLogInput;
+}) {
+  const db = getDatabase();
+  const deletes = Array.from(new Set(input.changes.deletes ?? []));
+  const upserts = input.changes.upserts ?? [];
+
+  await db.transaction(async (tx) => {
+    for (const key of deletes) {
+      await tx.delete(runtimeSettings).where(eq(runtimeSettings.key, key));
+    }
+
+    for (const setting of upserts) {
+      await tx
+        .insert(runtimeSettings)
+        .values(setting)
+        .onConflictDoUpdate({
+          target: runtimeSettings.key,
+          set: {
+            value: setting.value ?? null,
+            encrypted: setting.encrypted ?? false,
+            updatedByAdminId: setting.updatedByAdminId ?? null,
+            updatedAt: new Date()
+          }
+        });
+    }
+
+    const [row] = await tx
+      .insert(auditLogs)
+      .values({
+        actorAdminId: input.audit.actorAdminId ?? null,
+        action: input.audit.action,
+        targetType: input.audit.targetType,
+        targetId: input.audit.targetId ?? null,
+        before: input.audit.before ?? null,
+        after: input.audit.after ?? null,
+        ipAddress: input.audit.ipAddress ?? null,
+        userAgent: input.audit.userAgent ?? null
+      })
+      .returning();
+
+    if (!row) {
+      throw new Error("Failed to create audit log");
     }
   });
 }
@@ -624,7 +676,12 @@ export async function listTelegramCommandPermissions(
   const rows = await db
     .select()
     .from(telegramCommandPermissions)
-    .where(input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined)
+    .where(
+      and(
+        input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
+        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
+      )
+    )
     .orderBy(desc(telegramCommandPermissions.updatedAt))
     .limit(limit)
     .offset(offset);
@@ -632,17 +689,48 @@ export async function listTelegramCommandPermissions(
   return rows.map(toIsoDate);
 }
 
-export async function upsertTelegramCommandPermission(input: NewTelegramCommandPermission) {
+export async function countTelegramCommandPermissions(input: { chatId?: string | undefined } = {}) {
   const db = getDatabase();
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(telegramCommandPermissions)
+    .where(
+      and(
+        input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
+        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
+      )
+    );
+
+  return row?.count ?? 0;
+}
+
+function normalizeTelegramCommandName(command: string) {
+  return command.trim().replace(/^\//, "").toLowerCase();
+}
+
+function assertManageableTelegramCommand(command: string) {
+  const normalizedCommand = normalizeTelegramCommandName(command);
+  if (reservedTelegramCommandNames.has(normalizedCommand)) {
+    throw new Error("/model is hidden and cannot be managed by command permission rules.");
+  }
+}
+
+export async function upsertTelegramCommandPermission(input: NewTelegramCommandPermission) {
+  assertManageableTelegramCommand(input.command);
+  const db = getDatabase();
+  const values = {
+    ...input,
+    command: normalizeTelegramCommandName(input.command)
+  };
   const rowUpdate = {
-    enabled: input.enabled,
+    enabled: values.enabled,
     updatedAt: new Date()
   };
-  const isGlobalRule = input.chatId === null || input.chatId === undefined;
+  const isGlobalRule = values.chatId === null || values.chatId === undefined;
   const [row] = isGlobalRule
     ? await db
         .insert(telegramCommandPermissions)
-        .values(input)
+        .values(values)
         .onConflictDoUpdate({
           target: telegramCommandPermissions.command,
           targetWhere: sql`${telegramCommandPermissions.chatId} is null`,
@@ -651,7 +739,7 @@ export async function upsertTelegramCommandPermission(input: NewTelegramCommandP
         .returning()
     : await db
         .insert(telegramCommandPermissions)
-        .values(input)
+        .values(values)
         .onConflictDoUpdate({
           target: [telegramCommandPermissions.chatId, telegramCommandPermissions.command],
           targetWhere: sql`${telegramCommandPermissions.chatId} is not null`,
@@ -664,6 +752,13 @@ export async function upsertTelegramCommandPermission(input: NewTelegramCommandP
   }
 
   return row;
+}
+
+export async function deleteTelegramCommandPermission(id: string) {
+  const db = getDatabase();
+  const [row] = await db.delete(telegramCommandPermissions).where(eq(telegramCommandPermissions.id, id)).returning();
+
+  return row ? toIsoDate(row) : null;
 }
 
 export async function resolveTelegramChatAccess(input: {
@@ -682,13 +777,15 @@ export async function resolveTelegramChatAccess(input: {
   });
 
   const db = getDatabase();
-  const permissions = input.command
+  const command = input.command ? normalizeTelegramCommandName(input.command) : null;
+  const shouldCheckCommandPermission = Boolean(command && !reservedTelegramCommandNames.has(command));
+  const permissions = shouldCheckCommandPermission
     ? await db
         .select()
         .from(telegramCommandPermissions)
         .where(
           and(
-            eq(telegramCommandPermissions.command, input.command),
+            eq(telegramCommandPermissions.command, command as string),
             or(eq(telegramCommandPermissions.chatId, input.chatId), isNull(telegramCommandPermissions.chatId))
           )
         )
@@ -786,6 +883,7 @@ export async function saveMessage(input: Omit<NewMessage, "conversationId"> & { 
 
 export async function saveConversationTurn(input: {
   telegramUserId: string;
+  telegramChatId?: string | null;
   telegramMessageId?: number | null;
   userContent: string;
   assistantContent: string;
@@ -815,11 +913,52 @@ export async function saveConversationTurn(input: {
       throw new Error("Failed to create conversation");
     }
 
+    if (input.telegramMessageId !== null && input.telegramMessageId !== undefined) {
+      const [existingUserMessage] = await tx
+        .select()
+        .from(messages)
+        .where(
+          and(
+            input.telegramChatId
+              ? eq(messages.telegramChatId, input.telegramChatId)
+              : and(eq(messages.telegramUserId, input.telegramUserId), isNull(messages.telegramChatId)),
+            eq(messages.telegramMessageId, input.telegramMessageId),
+            eq(messages.role, "user")
+          )
+        )
+        .orderBy(desc(messages.createdAt))
+        .limit(1);
+      if (existingUserMessage?.conversationId) {
+        const [existingAssistantMessage] = await tx
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.telegramUserId, input.telegramUserId),
+              eq(messages.conversationId, existingUserMessage.conversationId),
+              eq(messages.role, "assistant"),
+              gt(messages.createdAt, existingUserMessage.createdAt)
+            )
+          )
+          .orderBy(asc(messages.createdAt))
+          .limit(1);
+
+        if (existingAssistantMessage) {
+          return {
+            conversation,
+            userMessage: existingUserMessage,
+            assistantMessage: existingAssistantMessage
+          };
+        }
+      }
+    }
+
     const [userMessage] = await tx
       .insert(messages)
       .values({
         conversationId: conversation.id,
         telegramUserId: input.telegramUserId,
+        telegramChatId: input.telegramChatId ?? null,
         telegramMessageId: input.telegramMessageId ?? null,
         role: "user",
         content: input.userContent,
@@ -849,6 +988,55 @@ export async function saveConversationTurn(input: {
       assistantMessage
     };
   });
+}
+
+export async function findConversationTurnByTelegramMessage(input: {
+  telegramUserId: string;
+  telegramChatId?: string | null;
+  telegramMessageId: number;
+}) {
+  const db = getDatabase();
+  const [userMessage] = await db
+    .select()
+    .from(messages)
+    .where(
+      and(
+        input.telegramChatId
+          ? eq(messages.telegramChatId, input.telegramChatId)
+          : and(eq(messages.telegramUserId, input.telegramUserId), isNull(messages.telegramChatId)),
+        eq(messages.telegramMessageId, input.telegramMessageId),
+        eq(messages.role, "user")
+      )
+    )
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+
+  if (!userMessage?.conversationId) {
+    return null;
+  }
+
+  const [assistantMessage] = await db
+    .select()
+    .from(messages)
+    .where(
+      and(
+        eq(messages.telegramUserId, input.telegramUserId),
+        eq(messages.conversationId, userMessage.conversationId),
+        eq(messages.role, "assistant"),
+        gt(messages.createdAt, userMessage.createdAt)
+      )
+    )
+    .orderBy(asc(messages.createdAt))
+    .limit(1);
+
+  if (!assistantMessage) {
+    return null;
+  }
+
+  return {
+    userMessage,
+    assistantMessage
+  };
 }
 
 export async function listMessages(input: PaginationInput & { telegramUserId?: string | undefined } = defaultPagination) {
@@ -957,6 +1145,7 @@ export async function searchMemories(input: {
   embedding: number[];
   limit?: number;
   maxDistance?: number;
+  touchLastAccessed?: boolean;
 }) {
   const db = getDatabase();
   const limit = input.limit ?? 5;
@@ -984,7 +1173,7 @@ export async function searchMemories(input: {
     .orderBy(distance)
     .limit(limit);
 
-  if (rows.length > 0) {
+  if (rows.length > 0 && input.touchLastAccessed !== false) {
     await db
       .update(memories)
       .set({ lastAccessedAt: new Date() })

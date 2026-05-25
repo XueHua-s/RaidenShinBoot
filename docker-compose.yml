@@ -1,13 +1,13 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: raiden-shin-postgres
+    container_name: ${POSTGRES_CONTAINER_NAME:-raiden-shin-postgres}
     environment:
       POSTGRES_USER: raiden
       POSTGRES_PASSWORD: raiden
       POSTGRES_DB: raiden_shin_boot
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - raiden_shin_postgres:/var/lib/postgresql/data
     healthcheck:
@@ -18,9 +18,9 @@ services:
 
   redis:
     image: redis/redis-stack-server:7.4.0-v8
-    container_name: raiden-shin-redis
+    container_name: ${REDIS_CONTAINER_NAME:-raiden-shin-redis}
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - raiden_shin_redis:/data
     healthcheck:
@@ -43,7 +43,9 @@ services:
         condition: service_healthy
     profiles:
       - app
+      - bot
       - migrate
+      - worker
 
   api:
     build:

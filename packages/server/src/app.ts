@@ -23,6 +23,14 @@ function corsOrigin(origin: string) {
     return origin;
   }
 
+  const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  if (allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+    return origin;
+  }
+
   return null;
 }
 

@@ -20,7 +20,7 @@ import { Badge } from "./components/ui/badge.js";
 import { Button } from "./components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card.js";
 import { Input, Label } from "./components/ui/input.js";
-import { apiClient, readJson, setCsrfToken } from "./lib/apiClient.js";
+import { apiClient, authExpiredEvent, readJson, setCsrfToken } from "./lib/apiClient.js";
 import { I18nProvider, useI18n } from "./lib/i18n.js";
 import { cn, errorMessage } from "./lib/utils.js";
 import { AuditPage } from "./pages/AuditPage.js";
@@ -292,6 +292,15 @@ function AdminApp() {
     refreshSession();
   }, [refreshSession]);
 
+  useEffect(() => {
+    function handleAuthExpired() {
+      setAuth({ user: null, loading: false });
+    }
+
+    window.addEventListener(authExpiredEvent, handleAuthExpired);
+    return () => window.removeEventListener(authExpiredEvent, handleAuthExpired);
+  }, []);
+
   async function logout() {
     try {
       await apiClient.api.auth.logout.$post();
@@ -323,12 +332,12 @@ function AdminApp() {
         }
       >
         <Route index element={<DashboardPage />} />
-        <Route path="telegram" element={<TelegramPage />} />
-        <Route path="conversations" element={<ConversationsPage />} />
+        <Route path="telegram" element={auth.user ? <TelegramPage user={auth.user} /> : <Navigate replace to="/login" />} />
+        <Route path="conversations" element={auth.user ? <ConversationsPage user={auth.user} /> : <Navigate replace to="/login" />} />
         <Route path="memory" element={<MemoryPage />} />
         <Route path="security" element={auth.user ? <SecurityPage user={auth.user} /> : <Navigate replace to="/login" />} />
         <Route path="audit" element={<AuditPage />} />
-        <Route path="system" element={<SystemPage />} />
+        <Route path="system" element={auth.user ? <SystemPage user={auth.user} /> : <Navigate replace to="/login" />} />
       </Route>
       <Route path="*" element={<Navigate replace to="/" />} />
     </Routes>

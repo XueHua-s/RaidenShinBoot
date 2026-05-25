@@ -4,6 +4,7 @@ export type MockRelayState = {
   chatPrompts: string[];
   chatCompletionFailures: number;
   responsesPrompts: string[];
+  embeddingInputs: string[];
   imagePrompts: string[];
   searchQueries: string[];
   wikipediaQueries: string[];
@@ -18,6 +19,7 @@ export function createMockRelayState(): MockRelayState {
     chatPrompts: [],
     chatCompletionFailures: 0,
     responsesPrompts: [],
+    embeddingInputs: [],
     imagePrompts: [],
     searchQueries: [],
     wikipediaQueries: [],
@@ -42,7 +44,12 @@ export function createMockRelay(state: MockRelayState) {
       }
 
       if (req.method === "POST" && req.url === "/v1/embeddings") {
-        await handleEmbedding(req, res);
+        await handleEmbedding(req, res, state);
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/v1/models") {
+        handleModels(res);
         return;
       }
 
@@ -70,6 +77,18 @@ export function createMockRelay(state: MockRelayState) {
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : "mock relay error" });
     }
+  });
+}
+
+function handleModels(res: ServerResponse) {
+  sendJson(res, 200, {
+    object: "list",
+    data: [
+      { id: "mock-chat", object: "model" },
+      { id: "mock-responses-only", object: "model" },
+      { id: "text-embedding-3-large", object: "model" },
+      { id: "chatgpt-image-latest", object: "model" }
+    ]
   });
 }
 
@@ -160,8 +179,13 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, state:
   });
 }
 
-async function handleEmbedding(req: IncomingMessage, res: ServerResponse) {
+async function handleEmbedding(req: IncomingMessage, res: ServerResponse, state: MockRelayState) {
   const body = JSON.parse(await readBody(req)) as { input?: unknown; model?: string };
+  if (typeof body.input === "string") {
+    state.embeddingInputs.push(body.input);
+  } else if (Array.isArray(body.input)) {
+    state.embeddingInputs.push(...body.input.filter((item): item is string => typeof item === "string"));
+  }
   sendJson(res, 200, {
     object: "list",
     model: body.model ?? "mock-embedding",
@@ -261,6 +285,48 @@ function handleMediaWiki(
 function resolveMockChatContent(system: string, prompt: string, state: MockRelayState) {
   if (system.includes("长期记忆提炼器")) {
     return resolveMockSummary(prompt, state);
+  }
+
+  if (system.includes("图像提示词生成器")) {
+    return prompt.includes("E2E_CHAT_AUTONOMOUS_IMAGE")
+      ? "Raiden Makoto autonomous image prompt: 自主生图画面，柔和雷光与樱花。"
+      : "Raiden Makoto image prompt: 稻妻夜色里的樱花与柔和雷光。";
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_PLANNER_WEB_ACTION")) {
+    return JSON.stringify({
+      action: "web_search",
+      reason: "E2E planner selected search",
+      query: "planner supplied search query",
+      prompt: null
+    });
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_PLANNER_IMAGE_ACTION")) {
+    return JSON.stringify({
+      action: "makoto_image",
+      reason: "E2E planner selected image",
+      query: null,
+      prompt: "planner supplied image prompt"
+    });
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_CHAT_AUTONOMOUS_IMAGE")) {
+    return JSON.stringify({
+      action: "makoto_image",
+      reason: "E2E planner selected autonomous image",
+      query: null,
+      prompt: "E2E_CHAT_AUTONOMOUS_IMAGE 自主生图画面"
+    });
+  }
+
+  if (system.includes("工具规划器") && prompt.includes("E2E_VALID_NONE_")) {
+    return JSON.stringify({
+      action: "none",
+      reason: "E2E valid none",
+      query: null,
+      prompt: null
+    });
   }
 
   state.chatPrompts.push(prompt);

@@ -185,6 +185,7 @@ export const messages = pgTable(
     telegramUserId: text("telegram_user_id")
       .notNull()
       .references(() => telegramUsers.telegramId, { onDelete: "cascade" }),
+    telegramChatId: text("telegram_chat_id"),
     telegramMessageId: bigint("telegram_message_id", { mode: "number" }),
     role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
     content: text("content").notNull(),
@@ -192,7 +193,10 @@ export const messages = pgTable(
   },
   (table) => [
     index("messages_user_created_idx").on(table.telegramUserId, table.createdAt),
-    index("messages_conversation_idx").on(table.conversationId)
+    index("messages_conversation_idx").on(table.conversationId),
+    uniqueIndex("messages_chat_telegram_message_idx")
+      .on(table.telegramChatId, table.telegramMessageId)
+      .where(sql`${table.telegramChatId} is not null and ${table.telegramMessageId} is not null and ${table.role} = 'user'`)
   ]
 );
 

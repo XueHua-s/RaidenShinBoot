@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isMemoryMutationRequest, isMemoryRecallRequest } from "@raiden/shared";
+import { shouldUseExplicitMakotoImageForMessage } from "@raiden/shared/boot";
 import { shouldUseBootSearchForMessage } from "@raiden/shared/tools";
 
 export const conversationCachePolicyVersion = "conversation-cache-v3";
@@ -44,6 +45,7 @@ export function isStandaloneCacheCandidate(content: string) {
     normalized.startsWith("/") ||
     isMemoryRecallRequest(normalized) ||
     isMemoryMutationRequest(normalized) ||
+    shouldUseExplicitMakotoImageForMessage(normalized) ||
     shouldUseBootSearchForMessage(normalized)
   ) {
     return false;

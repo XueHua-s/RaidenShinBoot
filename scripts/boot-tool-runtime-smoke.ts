@@ -93,7 +93,7 @@ async function main() {
   assert(searchResult.matches.length === 1, "select:makoto_image should return exactly one tool");
   assert(searchResult.matches[0]?.name === "makoto_image", "select:makoto_image should return makoto_image");
 
-  await withEnv({ DATABASE_URL: "", BOOT_IMAGE_BASE_URL: "not-a-url" }, async () => {
+  await withEnv({ DATABASE_URL: "", BOOT_IMAGE_BASE_URL: "not-a-url", BOOT_SEARCH_PROVIDER: "tavily" }, async () => {
     await expectBootToolRuntimeError(
       "effective web_search denied without image config parsing",
       () =>
