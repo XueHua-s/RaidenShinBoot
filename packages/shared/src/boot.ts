@@ -509,7 +509,7 @@ export async function planMakotoToolUse(input: {
       .join("\n");
     const text = await generateStreamedText({
       config,
-      system: "你是雷电真机器人的工具规划器。只输出一个 JSON 对象，不要输出 Markdown、解释或代码块。",
+      system: "你是雷电真对话链路的工具规划器。只输出一个 JSON 对象，不要输出 Markdown、解释或代码块。",
       prompt: `请判断本轮是否需要调用工具。
 
 可选 action：
