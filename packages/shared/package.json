@@ -19,10 +19,20 @@
       "types": "./dist/persona.d.mts",
       "import": "./dist/persona.mjs"
     },
+    "./persona-runtime": {
+      "source": "./src/persona-runtime.ts",
+      "types": "./dist/persona-runtime.d.mts",
+      "import": "./dist/persona-runtime.mjs"
+    },
     "./memory": {
       "source": "./src/memory.ts",
       "types": "./dist/memory.d.mts",
       "import": "./dist/memory.mjs"
+    },
+    "./model-config": {
+      "source": "./src/model-config.ts",
+      "types": "./dist/model-config.d.mts",
+      "import": "./dist/model-config.mjs"
     },
     "./schemas": {
       "source": "./src/schemas.ts",
@@ -41,13 +51,14 @@
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/boot.ts src/memory.ts src/persona.ts src/schemas.ts src/search.ts src/tools.ts --format esm --dts",
+    "build": "tsdown src/index.ts src/boot.ts src/memory.ts src/model-config.ts src/persona.ts src/persona-runtime.ts src/schemas.ts src/search.ts src/tools.ts --format esm --dts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.64",
     "ai": "^6.0.185",
     "robot3": "^1.2.0",
+    "yaml": "2.8.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

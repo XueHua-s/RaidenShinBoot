@@ -34,7 +34,7 @@ If bot and server both need the same behavior, move orchestration into `packages
 
 ## Database Rules
 
-- `memories.embedding` uses `halfvec(3072)`; embedding model changes must be checked against dimension.
+- Active memory retrieval uses `memories.embedding_local` as `halfvec(512)`; `memories.embedding` remains a legacy `halfvec(3072)` column during migration. Embedding changes must match the active column dimension and index.
 - HNSW cosine index must stay present for memory search.
 - Migration SQL must include `CREATE EXTENSION IF NOT EXISTS vector;` before `halfvec` usage.
 - Repository functions should return DTO-friendly shapes and avoid leaking raw vector fields to panel by default.

@@ -1,10 +1,20 @@
+import { createHash } from "node:crypto";
 import { createOpenAI } from "@ai-sdk/openai";
 import { embed, generateImage } from "ai";
 import { z } from "zod";
 import { errorMessage, isAbortError, timeoutSignal } from "./fetch-timeout.js";
-import { buildMemoryContext, raidenMakotoSystemPrompt } from "./persona.js";
+import {
+  getModelConfiguration,
+  modelAllowedByConfiguration,
+  modelCapabilities,
+  modelSelectableByUser,
+  type ModelConfiguration
+} from "./model-config.js";
+import { buildMemoryContext } from "./persona.js";
+import { getRaidenMakotoPersona } from "./persona-runtime.js";
 import {
   bootToolDecisionSchema,
+  generatedImageSchema,
   providerModelListResponseSchema,
   type BootToolDecision,
   type ChatModelListResponse,
@@ -16,27 +26,66 @@ const optionalString = z.preprocess((value) => (value === "" ? undefined : value
 const optionalUrl = z.preprocess((value) => (value === "" ? undefined : value), z.string().url().optional());
 const timeoutMs = z.coerce.number().int().min(1_000).max(600_000);
 
-export const fixedBootEmbeddingModel = "text-embedding-3-large";
-export const fixedBootImageModel = "chatgpt-image-latest";
-
 const bootEnvSchema = z.object({
-  BOOT_BASE_URL: z.string().url().default("https://proxy.xhblog.top:3000/v1"),
+  BOOT_BASE_URL: optionalUrl,
   BOOT_CHAT_BASE_URL: optionalUrl,
   BOOT_EMBEDDING_BASE_URL: optionalUrl,
   BOOT_API_KEY: optionalString,
   BOOT_CHAT_API_KEY: optionalString,
   BOOT_EMBEDDING_API_KEY: optionalString,
   BOOT_IMAGE_API_KEY: optionalString,
-  BOOT_CHAT_MODEL: z.string().default("gpt-5.5"),
-  BOOT_EMBEDDING_MODEL: z.string().default(fixedBootEmbeddingModel),
+  BOOT_CHAT_MODEL: optionalString,
+  BOOT_SUMMARY_MODEL: optionalString,
+  BOOT_MEMORY_MODEL: optionalString,
+  BOOT_TOOL_MODEL: optionalString,
+  BOOT_EMBEDDING_MODEL: optionalString,
+  BOOT_EMBEDDING_DIMENSIONS: z.coerce
+    .number()
+    .int()
+    .refine((value) => value === 512, "BOOT_EMBEDDING_DIMENSIONS must remain 512 for the local memory schema")
+    .optional(),
   BOOT_IMAGE_BASE_URL: optionalUrl,
-  BOOT_IMAGE_MODEL: z.string().default(fixedBootImageModel),
+  BOOT_IMAGE_MODEL: optionalString,
   BOOT_CHAT_TIMEOUT_MS: timeoutMs.default(90_000),
   BOOT_EMBEDDING_TIMEOUT_MS: timeoutMs.default(30_000),
   BOOT_IMAGE_TIMEOUT_MS: timeoutMs.default(180_000)
 });
 
-export type BootConfig = z.infer<typeof bootEnvSchema>;
+export type BootConfig = {
+  BOOT_BASE_URL: string;
+  BOOT_CHAT_BASE_URL?: string | undefined;
+  BOOT_EMBEDDING_BASE_URL: string;
+  BOOT_IMAGE_BASE_URL?: string | undefined;
+  BOOT_API_KEY?: string | undefined;
+  BOOT_CHAT_API_KEY?: string | undefined;
+  BOOT_EMBEDDING_API_KEY?: string | undefined;
+  BOOT_IMAGE_API_KEY?: string | undefined;
+  BOOT_CHAT_MODEL: string;
+  BOOT_SUMMARY_MODEL: string;
+  BOOT_MEMORY_MODEL: string;
+  BOOT_TOOL_MODEL: string;
+  BOOT_EMBEDDING_MODEL: string;
+  BOOT_EMBEDDING_DIMENSIONS: 512;
+  BOOT_EMBEDDING_QUERY_PREFIX: string;
+  BOOT_IMAGE_MODEL: string;
+  BOOT_CHAT_TIMEOUT_MS: number;
+  BOOT_EMBEDDING_TIMEOUT_MS: number;
+  BOOT_IMAGE_TIMEOUT_MS: number;
+  BOOT_CHAT_ENDPOINT: string;
+  BOOT_RESPONSES_ENDPOINT: string;
+  BOOT_CHAT_STREAM_REQUIRED: boolean;
+  BOOT_CATALOG_ENDPOINT: string;
+  BOOT_CATALOG_REFRESH_SECONDS: number;
+  BOOT_CATALOG_STALE_AFTER_SECONDS: number;
+  BOOT_IMAGE_CATALOG_ENDPOINT: string;
+  BOOT_IMAGE_CATALOG_REFRESH_SECONDS: number;
+  BOOT_IMAGE_CATALOG_STALE_AFTER_SECONDS: number;
+  MODEL_CONFIGURATION: ModelConfiguration;
+  PERSONA_ID: string;
+  PERSONA_VERSION: number;
+  PERSONA_HASH: string;
+  PERSONA_SYSTEM_PROMPT: string;
+};
 
 export type ChatHistoryItem = {
   role: "user" | "assistant" | "system";
@@ -59,11 +108,72 @@ export class BootProviderError extends Error {
 }
 
 export function getBootConfig(env: NodeJS.ProcessEnv = process.env): BootConfig {
-  const config = bootEnvSchema.parse(env);
+  const parsed = bootEnvSchema.parse(env);
+  const modelConfiguration = getModelConfiguration(env);
+  const languageProvider = modelConfiguration.providers[modelConfiguration.routing.language.provider];
+  const imageProvider = modelConfiguration.providers[modelConfiguration.routing.image.provider];
+  if (!languageProvider || !imageProvider) {
+    throw new Error("Model configuration references a missing provider");
+  }
+  const persona = getRaidenMakotoPersona(env);
+  const baseUrl =
+    parsed.BOOT_BASE_URL ?? (env[languageProvider.baseUrlEnv]?.trim() || "https://proxy.xhblog.top/v1");
+  const chatBaseUrl = (parsed.BOOT_CHAT_BASE_URL ?? env[languageProvider.chatBaseUrlEnv]?.trim()) || undefined;
+  const configuredImageProviderBaseUrl = env[imageProvider.baseUrlEnv]?.trim();
+  const imageBaseUrl =
+    (parsed.BOOT_IMAGE_BASE_URL ??
+      env[imageProvider.imageBaseUrlEnv]?.trim() ??
+      (imageProvider === languageProvider ? undefined : configuredImageProviderBaseUrl)) ||
+    undefined;
+  const imageModel = parsed.BOOT_IMAGE_MODEL ?? modelConfiguration.routing.image.default;
+  if (
+    !modelAllowedByConfiguration(modelConfiguration, imageModel) ||
+    !modelSelectableByUser(modelConfiguration, imageModel, "image") ||
+    !modelCapabilities(modelConfiguration, imageModel).includes("image")
+  ) {
+    throw new Error(`BOOT_IMAGE_MODEL "${imageModel}" is not allowed by the image routing configuration`);
+  }
   return {
-    ...config,
-    BOOT_EMBEDDING_MODEL: fixedBootEmbeddingModel,
-    BOOT_IMAGE_MODEL: fixedBootImageModel
+    BOOT_BASE_URL: baseUrl,
+    BOOT_CHAT_BASE_URL: chatBaseUrl,
+    BOOT_IMAGE_BASE_URL: imageBaseUrl,
+    BOOT_EMBEDDING_BASE_URL:
+      parsed.BOOT_EMBEDDING_BASE_URL ??
+      (env[modelConfiguration.embedding.baseUrlEnv]?.trim() || modelConfiguration.embedding.baseUrl),
+    BOOT_API_KEY: (parsed.BOOT_API_KEY ?? env[languageProvider.apiKeyEnv]?.trim()) || undefined,
+    BOOT_CHAT_API_KEY: (parsed.BOOT_CHAT_API_KEY ?? env[languageProvider.chatApiKeyEnv]?.trim()) || undefined,
+    BOOT_IMAGE_API_KEY:
+      (parsed.BOOT_IMAGE_API_KEY ??
+        env[imageProvider.imageApiKeyEnv]?.trim() ??
+        (imageProvider === languageProvider ? undefined : env[imageProvider.apiKeyEnv]?.trim())) ||
+      undefined,
+    BOOT_EMBEDDING_API_KEY:
+      (parsed.BOOT_EMBEDDING_API_KEY ?? env[modelConfiguration.embedding.apiKeyEnv]?.trim()) || undefined,
+    BOOT_CHAT_MODEL: parsed.BOOT_CHAT_MODEL ?? modelConfiguration.routing.language.defaults.conversation,
+    BOOT_SUMMARY_MODEL: parsed.BOOT_SUMMARY_MODEL ?? modelConfiguration.routing.language.defaults.summarization,
+    BOOT_MEMORY_MODEL: parsed.BOOT_MEMORY_MODEL ?? modelConfiguration.routing.language.defaults.memoryExtraction,
+    BOOT_TOOL_MODEL: parsed.BOOT_TOOL_MODEL ?? modelConfiguration.routing.language.defaults.toolReasoning,
+    BOOT_EMBEDDING_MODEL: parsed.BOOT_EMBEDDING_MODEL ?? modelConfiguration.embedding.model,
+    BOOT_EMBEDDING_DIMENSIONS: modelConfiguration.embedding.dimensions,
+    BOOT_EMBEDDING_QUERY_PREFIX: modelConfiguration.embedding.queryPrefix,
+    BOOT_IMAGE_MODEL: imageModel,
+    BOOT_CHAT_TIMEOUT_MS: parsed.BOOT_CHAT_TIMEOUT_MS,
+    BOOT_EMBEDDING_TIMEOUT_MS: parsed.BOOT_EMBEDDING_TIMEOUT_MS,
+    BOOT_IMAGE_TIMEOUT_MS: parsed.BOOT_IMAGE_TIMEOUT_MS,
+    BOOT_CHAT_ENDPOINT: languageProvider.protocol.chatEndpoint,
+    BOOT_RESPONSES_ENDPOINT: languageProvider.protocol.responsesEndpoint,
+    BOOT_CHAT_STREAM_REQUIRED: languageProvider.protocol.streamRequired,
+    BOOT_CATALOG_ENDPOINT: languageProvider.catalog.endpoint,
+    BOOT_CATALOG_REFRESH_SECONDS: languageProvider.catalog.refreshSeconds,
+    BOOT_CATALOG_STALE_AFTER_SECONDS: languageProvider.catalog.staleAfterSeconds,
+    BOOT_IMAGE_CATALOG_ENDPOINT: imageProvider.catalog.endpoint,
+    BOOT_IMAGE_CATALOG_REFRESH_SECONDS: imageProvider.catalog.refreshSeconds,
+    BOOT_IMAGE_CATALOG_STALE_AFTER_SECONDS: imageProvider.catalog.staleAfterSeconds,
+    MODEL_CONFIGURATION: modelConfiguration,
+    PERSONA_ID: persona.id,
+    PERSONA_VERSION: persona.version,
+    PERSONA_HASH: persona.hash,
+    PERSONA_SYSTEM_PROMPT: persona.systemPrompt
   };
 }
 
@@ -86,8 +196,8 @@ function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" 
 
 function createEmbeddingProvider(config = getBootConfig()) {
   return createOpenAI({
-    apiKey: resolveApiKey(config.BOOT_EMBEDDING_API_KEY ?? config.BOOT_API_KEY, "embedding"),
-    baseURL: config.BOOT_EMBEDDING_BASE_URL ?? config.BOOT_BASE_URL
+    apiKey: config.BOOT_EMBEDDING_API_KEY ?? "local-embedding-only",
+    baseURL: config.BOOT_EMBEDDING_BASE_URL
   });
 }
 
@@ -98,40 +208,93 @@ function createImageProvider(config = getBootConfig()) {
   });
 }
 
-async function generateStreamedText(input: { system: string; prompt: string; config: BootConfig }) {
-  let chatError: unknown;
-  try {
-    return await generateChatCompletionsText(input);
-  } catch (error) {
-    chatError = error;
+async function generateStreamedText(input: {
+  system: string;
+  prompt: string;
+  config: BootConfig;
+  model?: string;
+  abortSignal?: AbortSignal;
+  allowConfiguredFallbacks?: boolean;
+}) {
+  const primaryModel = input.model ?? input.config.BOOT_CHAT_MODEL;
+  const models = [
+    primaryModel,
+    ...(input.allowConfiguredFallbacks === false ? [] : input.config.MODEL_CONFIGURATION.routing.language.fallbacks)
+  ].filter((model, index, candidates) => model && candidates.indexOf(model) === index);
+  let lastError: unknown;
+
+  for (const model of models) {
+    let chatError: unknown;
+    try {
+      return await generateChatCompletionsText({ ...input, model });
+    } catch (error) {
+      if (isCancelledProviderError(error, input.abortSignal)) {
+        throw error;
+      }
+      chatError = error;
+    }
+
+    if (!shouldTryResponsesProtocol(chatError)) {
+      lastError = chatError;
+      continue;
+    }
+
+    try {
+      return await generateResponsesText({ ...input, model });
+    } catch (responsesError) {
+      if (isCancelledProviderError(responsesError, input.abortSignal)) {
+        throw responsesError;
+      }
+      lastError = combineProtocolErrors(model, chatError, responsesError);
+    }
   }
 
-  try {
-    return await generateResponsesText(input);
-  } catch (responsesError) {
-    if (chatError instanceof BootProviderError && responsesError instanceof BootProviderError) {
-      throw new BootProviderError(
-        `${chatError.message}; Responses fallback failed: ${responsesError.message}`,
-        responsesError.statusCode
-      );
-    }
-    throw responsesError;
-  }
+  throw lastError ?? new BootProviderError("No language model was available.");
 }
 
-async function generateChatCompletionsText(input: { system: string; prompt: string; config: BootConfig }) {
+function shouldTryResponsesProtocol(error: unknown) {
+  if (!(error instanceof BootProviderError)) {
+    return true;
+  }
+  if ([400, 404, 405, 415, 422, 501].includes(error.statusCode)) {
+    return true;
+  }
+  return /invalid|empty|readable chat stream/i.test(error.message) && !/HTTP (?:401|403|429|5\d\d)/i.test(error.message);
+}
+
+function combineProtocolErrors(model: string, chatError: unknown, responsesError: unknown) {
+  if (chatError instanceof BootProviderError && responsesError instanceof BootProviderError) {
+    return new BootProviderError(
+      `Model "${model}" failed on Chat Completions: ${chatError.message}; Responses fallback failed: ${responsesError.message}`,
+      responsesError.statusCode
+    );
+  }
+  return responsesError;
+}
+
+function isCancelledProviderError(error: unknown, abortSignal?: AbortSignal) {
+  return abortSignal?.aborted || (error instanceof BootProviderError && error.statusCode === 499);
+}
+
+async function generateChatCompletionsText(input: {
+  system: string;
+  prompt: string;
+  config: BootConfig;
+  model?: string;
+  abortSignal?: AbortSignal;
+}) {
   const response = await fetchProvider(
-    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/chat/completions"),
+    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, input.config.BOOT_CHAT_ENDPOINT),
     {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
         "content-type": "application/json",
-        accept: "text/event-stream"
+        accept: input.config.BOOT_CHAT_STREAM_REQUIRED ? "text/event-stream" : "application/json"
       },
       body: JSON.stringify({
-        model: input.config.BOOT_CHAT_MODEL,
-        stream: true,
+        model: input.model ?? input.config.BOOT_CHAT_MODEL,
+        stream: input.config.BOOT_CHAT_STREAM_REQUIRED,
         messages: [
           { role: "system", content: input.system },
           { role: "user", content: input.prompt }
@@ -139,32 +302,50 @@ async function generateChatCompletionsText(input: { system: string; prompt: stri
       })
     },
     input.config.BOOT_CHAT_TIMEOUT_MS,
-    "AI relay chat completions"
+    "AI relay chat completions",
+    input.abortSignal
   );
 
   if (!response.ok) {
     throw chatProviderError(
       response.status,
-      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions")
+      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions", input.abortSignal)
     );
   }
 
-  return readProviderStream(response, parseChatStreamEvent, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions");
+  if (input.config.BOOT_CHAT_STREAM_REQUIRED) {
+    return readProviderStream(
+      response,
+      parseChatStreamEvent,
+      input.config.BOOT_CHAT_TIMEOUT_MS,
+      "AI relay chat completions",
+      input.abortSignal
+    );
+  }
+  return parseChatCompletionResponse(
+    await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay chat completions", input.abortSignal)
+  );
 }
 
-async function generateResponsesText(input: { system: string; prompt: string; config: BootConfig }) {
+async function generateResponsesText(input: {
+  system: string;
+  prompt: string;
+  config: BootConfig;
+  model?: string;
+  abortSignal?: AbortSignal;
+}) {
   const response = await fetchProvider(
-    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, "/responses"),
+    joinUrl(input.config.BOOT_CHAT_BASE_URL ?? input.config.BOOT_BASE_URL, input.config.BOOT_RESPONSES_ENDPOINT),
     {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolveApiKey(input.config.BOOT_CHAT_API_KEY ?? input.config.BOOT_API_KEY, "chat")}`,
         "content-type": "application/json",
-        accept: "text/event-stream"
+        accept: input.config.BOOT_CHAT_STREAM_REQUIRED ? "text/event-stream" : "application/json"
       },
       body: JSON.stringify({
-        model: input.config.BOOT_CHAT_MODEL,
-        stream: true,
+        model: input.model ?? input.config.BOOT_CHAT_MODEL,
+        stream: input.config.BOOT_CHAT_STREAM_REQUIRED,
         instructions: input.system,
         input: [
           {
@@ -175,27 +356,48 @@ async function generateResponsesText(input: { system: string; prompt: string; co
       })
     },
     input.config.BOOT_CHAT_TIMEOUT_MS,
-    "AI relay Responses"
+    "AI relay Responses",
+    input.abortSignal
   );
 
   if (!response.ok) {
     throw chatProviderError(
       response.status,
-      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses")
+      await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses", input.abortSignal)
     );
   }
 
-  return readProviderStream(response, parseResponsesStreamEvent, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses");
+  if (input.config.BOOT_CHAT_STREAM_REQUIRED) {
+    return readProviderStream(
+      response,
+      parseResponsesStreamEvent,
+      input.config.BOOT_CHAT_TIMEOUT_MS,
+      "AI relay Responses",
+      input.abortSignal
+    );
+  }
+  return parseResponsesResponse(
+    await readProviderText(response, input.config.BOOT_CHAT_TIMEOUT_MS, "AI relay Responses", input.abortSignal)
+  );
 }
 
-async function fetchProvider(url: URL, init: RequestInit, timeoutMsValue: number, source: string) {
+async function fetchProvider(
+  url: URL,
+  init: RequestInit,
+  timeoutMsValue: number,
+  source: string,
+  abortSignal?: AbortSignal
+) {
   try {
     return await fetch(url, {
       ...init,
-      signal: timeoutSignal(timeoutMsValue)
+      signal: abortSignal ? AbortSignal.any([abortSignal, timeoutSignal(timeoutMsValue)]) : timeoutSignal(timeoutMsValue)
     });
   } catch (error) {
     if (isAbortError(error)) {
+      if (abortSignal?.aborted) {
+        throw new BootProviderError(`${source} was cancelled.`, 499);
+      }
       throw new BootProviderError(`${source} timed out after ${timeoutMsValue}ms.`, 504);
     }
     throw new BootProviderError(`${source} request failed: ${errorMessage(error)}`, 502);
@@ -206,27 +408,79 @@ async function readProviderStream(
   response: Response,
   parseEvent: (event: string) => string,
   timeoutMsValue: number,
-  source: string
+  source: string,
+  abortSignal?: AbortSignal
 ) {
   try {
     return await readStreamedText(response, parseEvent);
   } catch (error) {
     if (isAbortError(error)) {
+      if (abortSignal?.aborted) {
+        throw new BootProviderError(`${source} was cancelled.`, 499);
+      }
       throw new BootProviderError(`${source} stream timed out after ${timeoutMsValue}ms.`, 504);
     }
     throw error;
   }
 }
 
-async function readProviderText(response: Response, timeoutMsValue: number, source: string) {
+async function readProviderText(response: Response, timeoutMsValue: number, source: string, abortSignal?: AbortSignal) {
   try {
     return await response.text();
   } catch (error) {
     if (isAbortError(error)) {
+      if (abortSignal?.aborted) {
+        throw new BootProviderError(`${source} was cancelled.`, 499);
+      }
       throw new BootProviderError(`${source} response body timed out after ${timeoutMsValue}ms.`, 504);
     }
     throw new BootProviderError(`${source} response body failed: ${errorMessage(error)}`, 502);
   }
+}
+
+function parseChatCompletionResponse(body: string) {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new BootProviderError("AI relay returned an invalid Chat Completions response.");
+  }
+  const content =
+    payload && typeof payload === "object"
+      ? (payload as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content
+      : undefined;
+  if (typeof content !== "string" || !content.trim()) {
+    throw new BootProviderError("AI relay returned an empty Chat Completions response.");
+  }
+  return content.trim();
+}
+
+function parseResponsesResponse(body: string) {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new BootProviderError("AI relay returned an invalid Responses response.");
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new BootProviderError("AI relay returned an empty Responses response.");
+  }
+  const response = payload as {
+    output_text?: unknown;
+    output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
+  };
+  const outputText =
+    typeof response.output_text === "string"
+      ? response.output_text
+      : response.output
+          ?.flatMap((item) => item.content ?? [])
+          .filter((item) => item.type === "output_text" && typeof item.text === "string")
+          .map((item) => item.text)
+          .join("");
+  if (!outputText?.trim()) {
+    throw new BootProviderError("AI relay returned an empty Responses response.");
+  }
+  return outputText.trim();
 }
 
 async function readStreamedText(response: Response, parseEvent: (event: string) => string) {
@@ -360,98 +614,254 @@ function joinUrl(baseUrl: string, path: string) {
   return new URL(path.replace(/^\//, ""), baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }
 
-export async function listChatModels(config = getBootConfig()): Promise<ChatModelListResponse> {
-  const source = joinUrl(config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL, "/models");
-  const response = await fetchProvider(
-    source,
-    {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${resolveApiKey(config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY, "chat")}`,
-        accept: "application/json"
-      }
-    },
-    config.BOOT_CHAT_TIMEOUT_MS,
-    "AI relay models"
+type ProviderModels = z.infer<typeof providerModelListResponseSchema>["data"];
+type ModelCatalogCache = { models: ProviderModels; fetchedAt: number };
+type ModelCatalogResult = {
+  models: ProviderModels;
+  source: URL;
+  fetchedAt: number;
+  cacheStatus: "live" | "fresh_cache" | "stale_cache";
+};
+
+const modelCatalogCache = new Map<string, ModelCatalogCache>();
+const modelCatalogRequests = new Map<string, Promise<ModelCatalogResult>>();
+const successfulChatProbes = new Map<string, number>();
+
+async function listProviderModels(config: BootConfig, capability: "chat" | "image", forceRefresh = false) {
+  const imageCatalog = capability === "image";
+  const source = joinUrl(
+    imageCatalog ? (config.BOOT_IMAGE_BASE_URL ?? config.BOOT_BASE_URL) : (config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL),
+    imageCatalog ? config.BOOT_IMAGE_CATALOG_ENDPOINT : config.BOOT_CATALOG_ENDPOINT
   );
-
-  const body = await readProviderText(response, config.BOOT_CHAT_TIMEOUT_MS, "AI relay models");
-  if (!response.ok) {
-    throw chatProviderError(response.status, body);
+  const apiKey = resolveApiKey(
+    imageCatalog
+      ? (config.BOOT_IMAGE_API_KEY ?? config.BOOT_API_KEY)
+      : (config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY),
+    imageCatalog ? "image" : "chat"
+  );
+  const refreshSeconds = imageCatalog
+    ? config.BOOT_IMAGE_CATALOG_REFRESH_SECONDS
+    : config.BOOT_CATALOG_REFRESH_SECONDS;
+  const staleAfterSeconds = imageCatalog
+    ? config.BOOT_IMAGE_CATALOG_STALE_AFTER_SECONDS
+    : config.BOOT_CATALOG_STALE_AFTER_SECONDS;
+  const sourceLabel = imageCatalog ? "AI relay image models" : "AI relay chat models";
+  const cacheKey = createHash("sha256").update(`${source}\0${apiKey}`).digest("hex");
+  const cached = modelCatalogCache.get(cacheKey);
+  const now = Date.now();
+  if (!forceRefresh && cached && now - cached.fetchedAt < refreshSeconds * 1_000) {
+    return { models: cached.models, source, fetchedAt: cached.fetchedAt, cacheStatus: "fresh_cache" as const };
   }
 
-  let payload: unknown;
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    throw new BootProviderError(`AI relay returned an invalid models response: ${body.slice(0, 160)}`);
+  const pending = modelCatalogRequests.get(cacheKey);
+  if (pending) {
+    return pending;
   }
 
-  const parsed = providerModelListResponseSchema.parse(payload);
-  const models = parsed.data
-    .filter((model) => isLikelyChatModelId(model.id))
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const request = (async (): Promise<ModelCatalogResult> => {
+    try {
+      const response = await fetchProvider(
+        source,
+        {
+          method: "GET",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            accept: "application/json"
+          }
+        },
+        config.BOOT_CHAT_TIMEOUT_MS,
+        sourceLabel
+      );
+      const body = await readProviderText(response, config.BOOT_CHAT_TIMEOUT_MS, sourceLabel);
+      if (!response.ok) {
+        throw chatProviderError(response.status, body);
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        throw new BootProviderError("AI relay returned an invalid models response");
+      }
+      const models = providerModelListResponseSchema.parse(payload).data.sort((left, right) =>
+        left.id.localeCompare(right.id)
+      );
+      const fetchedAt = Date.now();
+      modelCatalogCache.set(cacheKey, { models, fetchedAt });
+      pruneModelCatalogCache(cacheKey);
+      return { models, source, fetchedAt, cacheStatus: "live" };
+    } catch (error) {
+      if (cached && now - cached.fetchedAt <= staleAfterSeconds * 1_000) {
+        return {
+          models: cached.models,
+          source,
+          fetchedAt: cached.fetchedAt,
+          cacheStatus: "stale_cache"
+        };
+      }
+      throw error;
+    } finally {
+      modelCatalogRequests.delete(cacheKey);
+    }
+  })();
+  modelCatalogRequests.set(cacheKey, request);
+  return request;
+}
+
+function pruneModelCatalogCache(currentKey: string) {
+  for (const key of modelCatalogCache.keys()) {
+    if (modelCatalogCache.size <= 20) {
+      return;
+    }
+    if (key !== currentKey) {
+      modelCatalogCache.delete(key);
+    }
+  }
+}
+
+export function clearProviderModelCatalogCache() {
+  modelCatalogCache.clear();
+  modelCatalogRequests.clear();
+  successfulChatProbes.clear();
+}
+
+export async function listChatModels(config = getBootConfig(), forceRefresh = false): Promise<ChatModelListResponse> {
+  const catalog = await listProviderModels(config, "chat", forceRefresh);
+  const models = catalog.models.filter((model) => isLikelyChatModelId(model.id, config));
   return {
     currentModel: config.BOOT_CHAT_MODEL,
     models,
-    source: source.toString()
+    source: catalog.source.toString(),
+    capability: "chat",
+    fetchedAt: new Date(catalog.fetchedAt).toISOString(),
+    cacheStatus: catalog.cacheStatus
   };
 }
 
-export function isLikelyChatModelId(modelId: string) {
-  const normalized = modelId.toLowerCase();
-  if (normalized === fixedBootEmbeddingModel || normalized === fixedBootImageModel) {
-    return false;
-  }
+export async function listImageModels(config = getBootConfig(), forceRefresh = false): Promise<ChatModelListResponse> {
+  const catalog = await listProviderModels(config, "image", forceRefresh);
+  return {
+    currentModel: config.BOOT_IMAGE_MODEL,
+    models: catalog.models.filter((model) => isLikelyImageModelId(model.id, config)),
+    source: catalog.source.toString(),
+    capability: "image",
+    fetchedAt: new Date(catalog.fetchedAt).toISOString(),
+    cacheStatus: catalog.cacheStatus
+  };
+}
 
-  return ![
-    "embedding",
-    "text-embedding",
-    "image",
-    "gpt-image",
-    "dall-e",
-    "whisper",
-    "tts",
-    "moderation",
-    "rerank"
-  ].some((marker) => normalized.includes(marker));
+export function isLikelyChatModelId(modelId: string, config = getBootConfig()) {
+  return (
+    modelAllowedByConfiguration(config.MODEL_CONFIGURATION, modelId) &&
+    modelSelectableByUser(config.MODEL_CONFIGURATION, modelId, "chat") &&
+    modelCapabilities(config.MODEL_CONFIGURATION, modelId).includes("chat")
+  );
+}
+
+export function isLikelyImageModelId(modelId: string, config = getBootConfig()) {
+  return (
+    modelAllowedByConfiguration(config.MODEL_CONFIGURATION, modelId) &&
+    modelSelectableByUser(config.MODEL_CONFIGURATION, modelId, "image") &&
+    modelCapabilities(config.MODEL_CONFIGURATION, modelId).includes("image")
+  );
 }
 
 export async function probeChatModel(modelId: string, config = getBootConfig()) {
+  if (!config.MODEL_CONFIGURATION.probes.beforePublish) {
+    return;
+  }
+  const now = Date.now();
+  const maxAgeMs = config.MODEL_CONFIGURATION.probes.cacheSeconds * 1_000;
+  const cacheKey = chatProbeCacheKey(modelId, config);
+  const lastSuccess = successfulChatProbes.get(cacheKey);
+  if (lastSuccess !== undefined && now - lastSuccess < maxAgeMs) {
+    return;
+  }
   const candidateConfig = {
     ...config,
     BOOT_CHAT_MODEL: modelId
   };
   await generateStreamedText({
     config: candidateConfig,
+    model: modelId,
+    allowConfiguredFallbacks: false,
     system: "You are a health probe. Reply with exactly OK.",
-    prompt: "OK"
+    prompt: config.MODEL_CONFIGURATION.probes.chatPrompt
   });
+  successfulChatProbes.set(cacheKey, now);
+  pruneChatProbeCache(now, maxAgeMs);
 }
 
-export async function embedText(value: string, config = getBootConfig()): Promise<number[]> {
+function chatProbeCacheKey(modelId: string, config: BootConfig) {
+  return createHash("sha256")
+    .update(
+      [
+        modelId,
+        config.BOOT_CHAT_BASE_URL ?? config.BOOT_BASE_URL,
+        config.BOOT_CHAT_ENDPOINT,
+        config.BOOT_RESPONSES_ENDPOINT,
+        String(config.BOOT_CHAT_STREAM_REQUIRED),
+        config.BOOT_CHAT_API_KEY ?? config.BOOT_API_KEY ?? "",
+        config.MODEL_CONFIGURATION.probes.chatPrompt
+      ].join("\0")
+    )
+    .digest("hex");
+}
+
+function pruneChatProbeCache(now: number, maxAgeMs: number) {
+  for (const [key, successfulAt] of successfulChatProbes) {
+    if (successfulChatProbes.size <= 200 && now - successfulAt < maxAgeMs) {
+      continue;
+    }
+    successfulChatProbes.delete(key);
+  }
+}
+
+async function embedLocalText(
+  value: string,
+  inputType: "query" | "document",
+  config = getBootConfig(),
+  abortSignal?: AbortSignal
+): Promise<number[]> {
   const provider = createEmbeddingProvider(config);
   let result: Awaited<ReturnType<typeof embed>>;
   try {
     result = await embed({
       model: provider.embedding(config.BOOT_EMBEDDING_MODEL),
-      value,
-      abortSignal: timeoutSignal(config.BOOT_EMBEDDING_TIMEOUT_MS)
+      value: inputType === "query" ? `${config.BOOT_EMBEDDING_QUERY_PREFIX}${value}` : value,
+      abortSignal: abortSignal
+        ? AbortSignal.any([abortSignal, timeoutSignal(config.BOOT_EMBEDDING_TIMEOUT_MS)])
+        : timeoutSignal(config.BOOT_EMBEDDING_TIMEOUT_MS)
     });
   } catch (error) {
     if (isAbortError(error)) {
-      throw new BootProviderError(`AI relay embedding timed out after ${config.BOOT_EMBEDDING_TIMEOUT_MS}ms.`, 504);
+      if (abortSignal?.aborted) {
+        throw new BootProviderError("Local embedding was cancelled.", 499);
+      }
+      throw new BootProviderError(`Local embedding timed out after ${config.BOOT_EMBEDDING_TIMEOUT_MS}ms.`, 504);
     }
-    throw new BootProviderError(`AI relay embedding failed: ${errorMessage(error)}`, 502);
+    throw new BootProviderError(`Local embedding failed: ${errorMessage(error)}`, 502);
   }
 
-  if (result.embedding.length !== 3072) {
+  if (result.embedding.length !== config.BOOT_EMBEDDING_DIMENSIONS) {
     throw new Error(
-      `BOOT_EMBEDDING_MODEL must return 3072 dimensions for halfvec(3072); received ${result.embedding.length}`
+      `BOOT_EMBEDDING_MODEL must return ${config.BOOT_EMBEDDING_DIMENSIONS} dimensions; received ${result.embedding.length}`
     );
   }
 
   return result.embedding;
+}
+
+export function embedQuery(value: string, config = getBootConfig(), abortSignal?: AbortSignal) {
+  return embedLocalText(value, "query", config, abortSignal);
+}
+
+export function embedDocument(value: string, config = getBootConfig(), abortSignal?: AbortSignal) {
+  return embedLocalText(value, "document", config, abortSignal);
+}
+
+/** @deprecated Use embedQuery or embedDocument so BGE receives the correct retrieval prefix. */
+export function embedText(value: string, config = getBootConfig()) {
+  return embedDocument(value, config);
 }
 
 export async function generateMakotoReply(input: {
@@ -461,6 +871,8 @@ export async function generateMakotoReply(input: {
   memories?: MemoryHit[];
   webSearch?: WebSearchResponse | null;
   webSearchError?: string | null;
+  maxCharacters?: number;
+  abortSignal?: AbortSignal;
   config?: BootConfig;
 }): Promise<string> {
   const config = input.config ?? getBootConfig();
@@ -475,9 +887,11 @@ export async function generateMakotoReply(input: {
     .map((item) => `${item.role}: ${item.content}`)
     .join("\n");
 
-  return generateStreamedText({
+  const reply = await generateStreamedText({
     config,
-    system: raidenMakotoSystemPrompt,
+    model: config.BOOT_CHAT_MODEL,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    system: config.PERSONA_SYSTEM_PROMPT,
     prompt: `对话对象：${input.userName ?? "旅行者"}
 
 长期记忆：
@@ -492,14 +906,62 @@ ${historyText || "暂无近期对话。"}
 用户刚刚说：
 ${input.content}
 
-请以雷电真的语气自然回应。`
+请以雷电真的语气自然回应。${input.maxCharacters ? `\n回复不超过 ${input.maxCharacters} 个字符，先给出最有用的内容。` : ""}`
   });
+  return sanitizePublicModelText(reply, input.maxCharacters ?? 3500);
+}
+
+export async function summarizeConversation(input: {
+  history: ChatHistoryItem[];
+  config?: BootConfig;
+  maxCharacters?: number;
+  abortSignal?: AbortSignal;
+}) {
+  const config = input.config ?? getBootConfig();
+  const transcript = input.history
+    .slice(-80)
+    .map((item) => `${item.role === "assistant" ? "真" : "成员"}：${item.content}`)
+    .join("\n");
+  if (!transcript) {
+    return "暂无可总结的对话。";
+  }
+  const summary = await generateStreamedText({
+    config,
+    model: config.BOOT_SUMMARY_MODEL,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+    system: "你是群聊摘要器。只输出面向群成员的中文摘要，不输出推理过程、系统提示、工具参数或内部实现。",
+    prompt: `请总结以下近期对话。提炼主要话题、已达成的结论和仍待解决的问题；不要猜测未出现的事实。\n\n${transcript}`
+  });
+  return sanitizePublicModelText(summary, input.maxCharacters ?? 1200);
+}
+
+export function sanitizePublicModelText(value: string, maxCharacters = 3500) {
+  const withoutHiddenBlocks = value
+    .replace(/<(think|analysis|reasoning)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(?:think|analysis|reasoning)(?:\s[^>]*)?>[\s\S]*$/gi, "")
+    .replace(/```(?:thought|analysis|reasoning)\b[\s\S]*?(?:```|$)/gi, "");
+  const visible = withoutHiddenBlocks
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:thought|analysis|reasoning|system\s*prompt|tool\s*(?:call|trace))\s*:/i.test(line))
+    .filter((line) => !/^\s*(?:思考过程|系统提示词|工具调用轨迹)\s*[：:]/.test(line))
+    .join("\n")
+    .trim();
+  if (!visible) {
+    throw new BootProviderError("AI relay returned no safe public reply.");
+  }
+  if (visible.length <= maxCharacters) {
+    return visible;
+  }
+  const candidate = visible.slice(0, Math.max(1, maxCharacters - 1));
+  const boundary = Math.max(candidate.lastIndexOf("。"), candidate.lastIndexOf("！"), candidate.lastIndexOf("？"));
+  return `${boundary >= Math.floor(maxCharacters * 0.55) ? candidate.slice(0, boundary + 1) : candidate}…`;
 }
 
 export async function planMakotoToolUse(input: {
   content: string;
   history?: ChatHistoryItem[];
   config?: BootConfig;
+  abortSignal?: AbortSignal;
 }): Promise<BootToolDecision> {
   const config = withMaxChatTimeout(input.config ?? getBootConfig(), 15_000);
   try {
@@ -509,6 +971,8 @@ export async function planMakotoToolUse(input: {
       .join("\n");
     const text = await generateStreamedText({
       config,
+      model: config.BOOT_TOOL_MODEL,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       system: "你是雷电真对话链路的工具规划器。只输出一个 JSON 对象，不要输出 Markdown、解释或代码块。",
       prompt: `请判断本轮是否需要调用工具。
 
@@ -555,6 +1019,7 @@ export async function generateMakotoImagePrompt(input: {
   userName?: string | null;
   history?: ChatHistoryItem[];
   config?: BootConfig;
+  abortSignal?: AbortSignal;
 }) {
   const config = withMaxChatTimeout(input.config ?? getBootConfig(), 20_000);
   const historyText = (input.history ?? [])
@@ -563,6 +1028,8 @@ export async function generateMakotoImagePrompt(input: {
     .join("\n");
   const prompt = await generateStreamedText({
     config,
+    model: config.BOOT_TOOL_MODEL,
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
     system:
       "你是图像提示词生成器。将用户意图改写成可直接用于图像生成模型的高质量提示词。只输出提示词正文，不要 Markdown。",
     prompt: `角色基调：雷电真，温柔、优雅、稻妻、樱花、柔和雷光、人情味。不要生成文字、logo、水印、UI、官方截图。
@@ -672,9 +1139,19 @@ function deterministicToolDecisionFallback(
 }
 
 export function shouldUseExplicitMakotoImageForMessage(content: string) {
-  return /(画图|生图|出图|绘制|生成(一张|图片|图像|头像|壁纸|插画)|做(一张|个)?(头像|壁纸|插画)|draw\s+(an?\s+)?image|image\s*gen|generate\s+(an?\s+)?image|illustrat(e|ion))/i.test(
-    content
-  );
+  const requestPattern =
+    /(画图|画(?:一下|(?:一|两|几)?(?:张|幅|个|只))|生图|出图|绘制|生成(?:一张|图片|图像|头像|壁纸|插画)|做(?:一张|个)?(?:头像|壁纸|插画)|draw\s+(?:an?\s+)?image|image\s*gen|generate\s+(?:an?\s+)?image|illustrat(?:e|ion))/giu;
+  for (const match of content.matchAll(requestPattern)) {
+    const prefix = content.slice(Math.max(0, (match.index ?? 0) - 24), match.index ?? 0);
+    if (
+      !/(?:不要|别|无需|不必|不需要|请勿)(?:(?:再|你|给我|帮我)\s*)*$|(?:do\s+not|don't|dont|no\s+need\s+to)\s*$/iu.test(
+        prefix
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function shouldUseMakotoImageForMessage(content: string) {
@@ -697,6 +1174,7 @@ export async function summarizeForMemory(input: {
 
   const text = await generateStreamedText({
     config,
+    model: config.BOOT_MEMORY_MODEL,
     system:
       "你是长期记忆提炼器。只提炼稳定偏好、个人背景、长期目标、重要约定或值得未来引用的事实。没有值得记忆的信息时只输出 EMPTY。",
     prompt: `用户：${input.userName ?? "未知"}
@@ -715,6 +1193,7 @@ export async function generateMakotoImage(input: {
   size?: `${number}x${number}`;
   n?: number;
   config?: BootConfig;
+  abortSignal?: AbortSignal;
 }) {
   const config = input.config ?? getBootConfig();
   const provider = createImageProvider(config);
@@ -729,20 +1208,31 @@ export async function generateMakotoImage(input: {
       ].join("\n"),
       n: input.n ?? 1,
       size: input.size ?? "1024x1024",
-      abortSignal: timeoutSignal(config.BOOT_IMAGE_TIMEOUT_MS)
+      abortSignal: input.abortSignal
+        ? AbortSignal.any([input.abortSignal, timeoutSignal(config.BOOT_IMAGE_TIMEOUT_MS)])
+        : timeoutSignal(config.BOOT_IMAGE_TIMEOUT_MS)
     });
   } catch (error) {
     if (isAbortError(error)) {
+      if (input.abortSignal?.aborted) {
+        throw new BootProviderError("AI relay image generation was cancelled.", 499);
+      }
       throw new BootProviderError(`AI relay image generation timed out after ${config.BOOT_IMAGE_TIMEOUT_MS}ms.`, 504);
     }
     throw new BootProviderError(`AI relay image generation failed: ${errorMessage(error)}`, 502);
   }
 
-  return {
-    images: result.images.map((image) => ({
-      base64: image.base64,
-      mediaType: image.mediaType
-    })),
-    warnings: result.warnings.map((warning) => `${warning.type}: ${JSON.stringify(warning)}`)
-  };
+  try {
+    return {
+      images: result.images.map((image) =>
+        generatedImageSchema.parse({
+          base64: image.base64,
+          mediaType: image.mediaType
+        })
+      ),
+      warnings: result.warnings.map((warning) => `${warning.type}: ${JSON.stringify(warning)}`)
+    };
+  } catch {
+    throw new BootProviderError("AI relay returned unsupported or oversized image data.", 502);
+  }
 }

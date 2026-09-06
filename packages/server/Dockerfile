@@ -7,6 +7,8 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages ./packages
 COPY scripts ./scripts
+COPY config ./config
+COPY personas ./personas
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm -r --sort build

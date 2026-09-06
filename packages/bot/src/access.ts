@@ -1,10 +1,32 @@
 import type { Context, MiddlewareFn } from "grammy";
 import { resolveTelegramChatAccess, upsertTelegramChatMember, upsertTelegramUser } from "@raiden/database";
 
+type TelegramAccess = Awaited<ReturnType<typeof resolveTelegramChatAccess>>;
+const accessByContext = new WeakMap<Context, TelegramAccess>();
+
+export function getTelegramAccess(ctx: Context) {
+  return accessByContext.get(ctx) ?? null;
+}
+
 function textCommand(ctx: Context) {
   const text = ctx.message && "text" in ctx.message ? ctx.message.text : undefined;
   const match = text?.trim().match(/^\/([a-zA-Z0-9_]+)/);
-  return match?.[1]?.toLowerCase() ?? null;
+  if (match?.[1]) {
+    return match[1].toLowerCase();
+  }
+
+  const callbackNamespace = ctx.callbackQuery?.data?.split(":", 1)[0];
+  if (callbackNamespace === "menu") {
+    return "menu";
+  }
+  if (callbackNamespace === "privacy") {
+    return "privacy";
+  }
+  if (callbackNamespace === "image") {
+    return "draw";
+  }
+
+  return null;
 }
 
 function chatTitle(ctx: Context) {
@@ -59,7 +81,12 @@ export const enforceTelegramAccess: MiddlewareFn<Context> = async (ctx, next) =>
   await rememberActor(ctx);
 
   if (access.allowed) {
-    await next();
+    accessByContext.set(ctx, access);
+    try {
+      await next();
+    } finally {
+      accessByContext.delete(ctx);
+    }
     return;
   }
 

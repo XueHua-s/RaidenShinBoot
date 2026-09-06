@@ -653,7 +653,7 @@ export function shouldUseWebSearchForMessage(content: string) {
 }
 
 function shouldUseGoogleSearch(content: string) {
-  return /(联网|搜索|搜一下|查一下|帮我查|查找|资料来源|最新|新闻|当前|现在的|目前的|今天.*(新闻|消息|价格|进展)|google|谷歌|web\s*search|search\s+the\s+web|look\s+up)/i.test(
+  return /(联网|搜索|搜一下|查一下|帮我查|查找|资料来源|最新|新闻|当前|现在的|目前的|天气|气温|空气质量|汇率|股价|航班|比分|油价|今天.*(新闻|消息|价格|进展)|google|谷歌|web\s*search|search\s+the\s+web|look\s+up)/i.test(
     content
   );
 }

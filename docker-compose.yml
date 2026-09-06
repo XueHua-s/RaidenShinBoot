@@ -29,6 +29,38 @@ services:
       timeout: 5s
       retries: 10
 
+  embedding:
+    build:
+      context: .
+      dockerfile: services/embedding/Dockerfile
+    environment:
+      EMBEDDING_HOST: 0.0.0.0
+      EMBEDDING_PORT: 8080
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_MODEL_SOURCE: ${EMBEDDING_MODEL_SOURCE:-modelscope}
+      EMBEDDING_MODEL_PATH: ${EMBEDDING_MODEL_PATH:-}
+      MODELSCOPE_ENDPOINT: ${MODELSCOPE_ENDPOINT:-https://modelscope.cn}
+      MODELSCOPE_MODEL_ID: ${MODELSCOPE_MODEL_ID:-AI-ModelScope/bge-small-zh-v1.5}
+      MODELSCOPE_MODEL_REVISION: ${MODELSCOPE_MODEL_REVISION:-master}
+      EMBEDDING_DIMENSIONS: 512
+      EMBEDDING_TORCH_THREADS: ${EMBEDDING_TORCH_THREADS:-4}
+      HF_HUB_DISABLE_XET: "1"
+    ports:
+      - "127.0.0.1:${EMBEDDING_PORT:-8080}:8080"
+    volumes:
+      - raiden_embedding_models:/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 90s
+    profiles:
+      - app
+      - bot
+      - worker
+
   migrate:
     build:
       context: .
@@ -47,6 +79,26 @@ services:
       - migrate
       - worker
 
+  embedding-backfill:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
+      BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
+    command: ["pnpm", "db:backfill-embeddings"]
+    depends_on:
+      embedding:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - app
+      - bot
+      - worker
+
   api:
     build:
       context: .
@@ -58,6 +110,7 @@ services:
       SERVER_PORT: 8787
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
       REDIS_URL: redis://redis:6379
+      BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
     ports:
       - "${SERVER_PORT:-8787}:8787"
     depends_on:
@@ -65,7 +118,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
+      embedding:
+        condition: service_healthy
+      embedding-backfill:
         condition: service_completed_successfully
     profiles:
       - app
@@ -92,13 +147,16 @@ services:
     environment:
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
       REDIS_URL: redis://redis:6379
+      BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
       BOT_RUNTIME_MODE: polling
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
+      embedding:
+        condition: service_healthy
+      embedding-backfill:
         condition: service_completed_successfully
     profiles:
       - bot
@@ -112,6 +170,7 @@ services:
     environment:
       DATABASE_URL: postgres://raiden:raiden@postgres:5432/raiden_shin_boot
       REDIS_URL: redis://redis:6379
+      BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
       BOT_RUNTIME_MODE: worker
       BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED: "true"
     command: ["pnpm", "--filter", "@raiden/bot", "start:worker"]
@@ -120,11 +179,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
+      embedding:
+        condition: service_healthy
+      embedding-backfill:
         condition: service_completed_successfully
     profiles:
+      - bot
       - worker
 
 volumes:
   raiden_shin_postgres:
   raiden_shin_redis:
+  raiden_embedding_models:

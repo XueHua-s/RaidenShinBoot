@@ -5,13 +5,16 @@ import {
   getEffectiveBootConfig,
   getEffectiveBootSearchConfig,
   getSemanticCacheConfig,
+  invalidateConversationCacheForUser,
   isStandaloneCacheCandidate,
   lookupConversationCache,
   processMemoryEnrichmentJob,
+  resolveBootConversationScope,
   runBootConversation
 } from "@raiden/boot";
 import {
   closeDatabase,
+  createMemory,
   createAdminUser,
   countActiveSuperAdmins,
   deleteRuntimeSetting,
@@ -20,15 +23,28 @@ import {
   listRuntimeSettings,
   listMemories,
   resolveTelegramChatAccess,
+  searchMemories,
   updateTelegramChat,
   upsertTelegramCommandPermission,
   upsertRuntimeSetting
 } from "@raiden/database";
 import { app } from "@raiden/server/app";
 import { hashPassword } from "@raiden/server/auth";
-import type { BootToolDescriptor, BootToolSearchResponse } from "@raiden/shared";
-import { planMakotoToolUse } from "@raiden/shared/boot";
+import type {
+  BootToolDescriptor,
+  BootToolSearchResponse,
+  ChatModelListResponse,
+  RuntimeSettings
+} from "@raiden/shared";
+import {
+  clearProviderModelCatalogCache,
+  generateMakotoReply,
+  getBootConfig,
+  planMakotoToolUse,
+  probeChatModel
+} from "@raiden/shared/boot";
 import { replyAsMakoto } from "../packages/bot/src/conversation.js";
+import { TelegramInteractionPolicy } from "../packages/bot/src/interaction-policy.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
 
@@ -47,6 +63,8 @@ async function main() {
   const semanticCacheTelegramUserId = `e2e-cache-${Date.now()}`;
   const botUserNumericId = Date.now() % 1_000_000_000;
   const botTelegramUserId = String(botUserNumericId);
+  const secondBotUserNumericId = botUserNumericId + 1;
+  const secondBotTelegramUserId = String(secondBotUserNumericId);
   const adminUsername = `e2e-admin-${Date.now()}`;
   const adminPassword = "e2e-admin-password-123";
   const sql = getSqlClient();
@@ -65,6 +83,9 @@ async function main() {
     "BOOT_IMAGE_API_KEY",
     "BOOT_SEARCH_API_KEY",
     "BOOT_CHAT_MODEL",
+    "BOOT_SUMMARY_MODEL",
+    "BOOT_MEMORY_MODEL",
+    "BOOT_TOOL_MODEL",
     "BOOT_EMBEDDING_MODEL",
     "BOOT_IMAGE_MODEL",
     "BOOT_SEARCH_PROVIDER",
@@ -86,8 +107,11 @@ async function main() {
   process.env.BOOT_IMAGE_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.BOOT_API_KEY = "e2e-local-key";
   process.env.BOOT_CHAT_MODEL = "mock-chat";
+  process.env.BOOT_SUMMARY_MODEL = "mock-chat";
+  process.env.BOOT_MEMORY_MODEL = "mock-chat";
+  process.env.BOOT_TOOL_MODEL = "mock-chat";
   process.env.BOOT_EMBEDDING_MODEL = "mock-embedding";
-  process.env.BOOT_IMAGE_MODEL = "mock-image";
+  process.env.BOOT_IMAGE_MODEL = "gpt-image-2-codex";
   process.env.BOOT_SEARCH_PROVIDER = "tavily";
   process.env.BOOT_SEARCH_BASE_URL = `http://127.0.0.1:${port}`;
   process.env.BOOT_WIKIPEDIA_API_URL = `http://127.0.0.1:${port}/wiki/api.php`;
@@ -101,11 +125,83 @@ async function main() {
   process.env.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED = "false";
   process.env.BOOT_SEMANTIC_CACHE_ENABLED = "false";
 
+  const transportConfig = getBootConfig(process.env);
+  const nonStreamingReply = await generateMakotoReply({
+    content: "E2E_NON_STREAMING 验证非流式兼容链路。",
+    config: { ...transportConfig, BOOT_CHAT_STREAM_REQUIRED: false }
+  });
+  if (!nonStreamingReply.includes("端到端验证")) {
+    throw new Error("Non-streaming Chat Completions transport did not return the expected reply");
+  }
+
+  const fallbackReply = await generateMakotoReply({
+    content: "E2E_MODEL_FALLBACK 验证 YAML 模型回退链路。",
+    config: {
+      ...transportConfig,
+      BOOT_CHAT_MODEL: "mock-unavailable",
+      MODEL_CONFIGURATION: {
+        ...transportConfig.MODEL_CONFIGURATION,
+        routing: {
+          ...transportConfig.MODEL_CONFIGURATION.routing,
+          language: {
+            ...transportConfig.MODEL_CONFIGURATION.routing.language,
+            fallbacks: ["mock-chat"]
+          }
+        }
+      }
+    }
+  });
+  if (!fallbackReply.includes("端到端验证")) {
+    throw new Error("Configured language model fallback did not return the expected reply");
+  }
+
+  clearProviderModelCatalogCache();
+  const probePromptCountBefore = relayState.chatPrompts.length;
+  await probeChatModel("mock-chat", transportConfig);
+  await probeChatModel("mock-chat", transportConfig);
+  if (relayState.chatPrompts.length !== probePromptCountBefore + 1) {
+    throw new Error("Successful chat probes should be reused for the configured cache window");
+  }
+
+  const interactionPolicy = new TelegramInteractionPolicy();
+  if (
+    interactionPolicy.decide({
+      chatId: "e2e-quiet-chat",
+      userId: "e2e-quiet-user",
+      messageId: 1,
+      text: "真姐姐，在吗？",
+      replyMode: "quiet",
+      directlyMentioned: false,
+      replyingToBot: false,
+      wakeWord: true,
+      now: 1_000
+    }) !== "ignore"
+  ) {
+    throw new Error("Quiet group mode should ignore wake words");
+  }
+  if (
+    interactionPolicy.decide({
+      chatId: "e2e-quiet-chat",
+      userId: "e2e-quiet-user",
+      messageId: 2,
+      text: "@raiden_e2e 在吗？",
+      replyMode: "quiet",
+      directlyMentioned: true,
+      replyingToBot: false,
+      wakeWord: false,
+      now: 2_000
+    }) !== "reply"
+  ) {
+    throw new Error("Quiet group mode should still reply to direct mentions");
+  }
+
   const baseCacheFingerprint = buildConversationCacheContextFingerprint({
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
     embeddingModel: "mock-embedding",
+    personaHash: "persona-v1",
+    userDisplayName: "小雪",
     searchProvider: "disabled",
     history: [],
     memories: []
@@ -115,6 +211,8 @@ async function main() {
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
     embeddingModel: "mock-embedding",
+    personaHash: "persona-v1",
+    userDisplayName: "小雪",
     searchProvider: "disabled",
     history: [{ id: "m1", role: "assistant", content: "previous reply", createdAt: "2026-01-01T00:00:00.000Z" }],
     memories: []
@@ -124,6 +222,8 @@ async function main() {
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
     embeddingModel: "mock-embedding",
+    personaHash: "persona-v1",
+    userDisplayName: "小雪",
     searchProvider: "disabled",
     history: [],
     memories: [
@@ -136,8 +236,34 @@ async function main() {
       }
     ]
   });
-  if (baseCacheFingerprint === changedHistoryFingerprint || baseCacheFingerprint === changedMemoryFingerprint) {
-    throw new Error("Conversation cache fingerprint should change when history or memory context changes");
+  const changedPersonaFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    personaHash: "persona-v2",
+    userDisplayName: "小雪",
+    searchProvider: "disabled",
+    history: [],
+    memories: []
+  });
+  const changedDisplayNameFingerprint = buildConversationCacheContextFingerprint({
+    protocol: "telegram",
+    userId: "e2e-cache-user",
+    chatModel: "mock-chat",
+    embeddingModel: "mock-embedding",
+    personaHash: "persona-v1",
+    userDisplayName: "旅行者",
+    searchProvider: "disabled",
+    history: [],
+    memories: []
+  });
+  if (
+    [changedHistoryFingerprint, changedMemoryFingerprint, changedPersonaFingerprint, changedDisplayNameFingerprint].includes(
+      baseCacheFingerprint
+    )
+  ) {
+    throw new Error("Conversation cache fingerprint should change with history, memory, persona, or display name");
   }
   if (isStandaloneCacheCandidate("继续说刚才那件事")) {
     throw new Error("Contextual follow-up prompts must not be semantic-cache candidates");
@@ -186,7 +312,8 @@ async function main() {
 
   try {
     await Promise.all(runtimeSettingKeys.map((key) => deleteRuntimeSetting(key)));
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from conversations where chat_id in ('-1009876543210', '-1009876543211')`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId}, ${secondBotTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from admin_users where username = ${adminUsername}`;
 
@@ -238,16 +365,7 @@ async function main() {
         throw new Error(`Runtime settings patch failed with ${response.status}: ${await response.text()}`);
       }
 
-      return response.json() as Promise<{
-        data: {
-          bootBaseUrl?: string;
-          bootChatBaseUrl?: string | null;
-          bootEmbeddingModel?: string;
-          bootImageModel?: string;
-          bootSearchProvider?: string;
-          secrets?: Record<string, boolean>;
-        };
-      }>;
+      return response.json() as Promise<{ data: RuntimeSettings }>;
     };
     const putCommandPermission = async (patch: { chatId: string | null; command: string; enabled: boolean }) => {
       const response = await authedRequest("/api/telegram/command-permissions", {
@@ -346,6 +464,10 @@ async function main() {
       bootEmbeddingBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootImageBaseUrl: `http://127.0.0.1:${port}/v1`,
       bootChatModel: "mock-chat",
+      bootSummaryModel: "mock-chat",
+      bootMemoryModel: "mock-chat",
+      bootToolModel: "mock-chat",
+      bootImageModel: "gpt-image-2-codex",
       bootSearchProvider: "tavily",
       bootSearchBaseUrl: `http://127.0.0.1:${port}`,
       bootWikipediaApiUrl: `http://127.0.0.1:${port}/wiki/api.php`,
@@ -357,8 +479,12 @@ async function main() {
     });
     if (
       runtimeSettings.data.bootBaseUrl !== `http://127.0.0.1:${port}/v1` ||
-      runtimeSettings.data.bootEmbeddingModel !== "text-embedding-3-large" ||
-      runtimeSettings.data.bootImageModel !== "chatgpt-image-latest" ||
+      runtimeSettings.data.bootChatModel !== "mock-chat" ||
+      runtimeSettings.data.bootSummaryModel !== "mock-chat" ||
+      runtimeSettings.data.bootMemoryModel !== "mock-chat" ||
+      runtimeSettings.data.bootToolModel !== "mock-chat" ||
+      runtimeSettings.data.bootEmbeddingModel !== "mock-embedding" ||
+      runtimeSettings.data.bootImageModel !== "gpt-image-2-codex" ||
       runtimeSettings.data.bootSearchProvider !== "tavily" ||
       !runtimeSettings.data.secrets?.bootApiKey ||
       !runtimeSettings.data.secrets.bootSearchApiKey
@@ -366,17 +492,51 @@ async function main() {
       throw new Error("Runtime settings did not persist new-api relay and secret status");
     }
 
-    const isolatedChatBasePatch = await patchRuntimeSettings({
-      bootChatBaseUrl: "http://127.0.0.1:1/v1"
-    });
-    if (isolatedChatBasePatch.data.bootChatBaseUrl !== "http://127.0.0.1:1/v1") {
-      throw new Error("Runtime settings should allow chat base URL updates without probing the unchanged chat model");
+    const chatModelsResponse = await authedRequest("/api/system/models/chat?refresh=true");
+    if (!chatModelsResponse.ok) {
+      throw new Error(
+        `Chat model catalog failed with ${chatModelsResponse.status}: ${await chatModelsResponse.text()}`
+      );
     }
-    const restoredChatBasePatch = await patchRuntimeSettings({
-      bootChatBaseUrl: `http://127.0.0.1:${port}/v1`
+    const chatModels = (await chatModelsResponse.json()) as ChatModelListResponse;
+    const chatModelIds = chatModels.models.map((model) => model.id);
+    if (
+      chatModels.currentModel !== "mock-chat" ||
+      chatModels.capability !== "chat" ||
+      chatModels.cacheStatus !== "live" ||
+      !chatModelIds.includes("mock-chat") ||
+      !chatModelIds.includes("mock-responses-only") ||
+      chatModelIds.includes("gpt-image-2-codex") ||
+      chatModelIds.includes("mock-embedding")
+    ) {
+      throw new Error("Chat model catalog did not apply configured capability filtering");
+    }
+
+    const imageModelsResponse = await authedRequest("/api/system/models/image");
+    if (!imageModelsResponse.ok) {
+      throw new Error(
+        `Image model catalog failed with ${imageModelsResponse.status}: ${await imageModelsResponse.text()}`
+      );
+    }
+    const imageModels = (await imageModelsResponse.json()) as ChatModelListResponse;
+    const imageModelIds = imageModels.models.map((model) => model.id);
+    if (
+      imageModels.currentModel !== "gpt-image-2-codex" ||
+      imageModels.capability !== "image" ||
+      imageModels.cacheStatus !== "fresh_cache" ||
+      imageModelIds.length !== 1 ||
+      imageModelIds[0] !== "gpt-image-2-codex"
+    ) {
+      throw new Error("Image model catalog did not expose the configured image model from cache");
+    }
+
+    const rejectedChatBasePatch = await authedRequest("/api/system/settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bootChatBaseUrl: "http://127.0.0.1:1/v1" })
     });
-    if (restoredChatBasePatch.data.bootChatBaseUrl !== `http://127.0.0.1:${port}/v1`) {
-      throw new Error("Runtime settings did not restore the chat base URL after isolated patch validation");
+    if (rejectedChatBasePatch.status !== 400) {
+      throw new Error(`Unreachable chat base URL should fail validation with 400, got ${rejectedChatBasePatch.status}`);
     }
 
     const failedAtomicSettingsResponse = await (async () => {
@@ -437,6 +597,9 @@ async function main() {
       try {
         await processMemoryEnrichmentJob({
           userId: apiTelegramUserId,
+          sourceChatId: null,
+          sourceThreadId: null,
+          sharedConversation: false,
           displayName: "E2E",
           content: "这是一条 E2E 链路 worker 严格失败传播验证。",
           reply: "我会尝试提炼这条记忆。",
@@ -536,6 +699,41 @@ async function main() {
     const botMemories = await listMemories({ telegramUserId: botTelegramUserId, limit: 5, offset: 0 });
     if (!botMemories.some((memory) => memory.summary.includes("小雪") && memory.summary.includes("团子牛奶"))) {
       throw new Error("Expected bot memory to preserve the user's nickname and preference");
+    }
+
+    const threadOneEmbedding = Array.from({ length: 512 }, (_, index) => (index === 0 ? 1 : 0));
+    const threadTwoEmbedding = Array.from({ length: 512 }, (_, index) => (index === 1 ? 1 : 0));
+    await createMemory({
+      telegramUserId: botTelegramUserId,
+      summary: "E2E 话题一记忆",
+      embedding: threadOneEmbedding,
+      embeddingModel: "mock-embedding",
+      scope: "user_in_chat",
+      sourceChatId: "-1009876543210",
+      sourceThreadId: "101"
+    });
+    await createMemory({
+      telegramUserId: botTelegramUserId,
+      summary: "E2E 话题二记忆",
+      embedding: threadTwoEmbedding,
+      embeddingModel: "mock-embedding",
+      scope: "user_in_chat",
+      sourceChatId: "-1009876543210",
+      sourceThreadId: "202"
+    });
+    const threadOneMemories = await searchMemories({
+      telegramUserId: botTelegramUserId,
+      embedding: threadOneEmbedding,
+      sourceChatId: "-1009876543210",
+      sourceThreadId: "101",
+      includePrivate: false,
+      limit: 10
+    });
+    if (
+      !threadOneMemories.some((memory) => memory.summary === "E2E 话题一记忆") ||
+      threadOneMemories.some((memory) => memory.summary === "E2E 话题二记忆")
+    ) {
+      throw new Error("Group memory retrieval must not cross Telegram topic boundaries");
     }
 
     const secondBotResult = await replyAsMakoto(
@@ -980,7 +1178,12 @@ async function main() {
         }
         await waitForConversationExactCacheHit(cacheInput);
         const chatPromptCountAfterFirstCacheChat = relayState.chatPrompts.length;
-        const cacheQueryEmbeddingCountAfterFirst = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
+        const cacheQueryEmbeddingCountAfterFirst = relayState.embeddingInputs.filter((input) =>
+          input.endsWith(cacheInput.content)
+        ).length;
+        if (cacheQueryEmbeddingCountAfterFirst < 1) {
+          throw new Error("Semantic cache first chat did not request a query embedding");
+        }
 
         const secondCacheChat = await runBootConversation(cacheInput);
         if (secondCacheChat.cacheStatus !== "l1_hit") {
@@ -989,18 +1192,75 @@ async function main() {
         if (relayState.chatPrompts.length !== chatPromptCountAfterFirstCacheChat) {
           throw new Error("Semantic cache hit should not call the chat model again");
         }
-        const cacheQueryEmbeddingCountAfterSecond = relayState.embeddingInputs.filter((input) => input === cacheInput.content).length;
+        const cacheQueryEmbeddingCountAfterSecond = relayState.embeddingInputs.filter((input) =>
+          input.endsWith(cacheInput.content)
+        ).length;
         if (cacheQueryEmbeddingCountAfterSecond !== cacheQueryEmbeddingCountAfterFirst) {
           throw new Error("L1 semantic cache hit should not refresh cache through a new query embedding");
         }
 
-        return { skipped: false as const, first: firstCacheChat.cacheStatus, second: secondCacheChat.cacheStatus };
+        const invalidatedCacheEntries = await invalidateConversationCacheForUser(
+          semanticCacheTelegramUserId,
+          getSemanticCacheConfig(process.env)
+        );
+        if (invalidatedCacheEntries < 1) {
+          throw new Error("User-level semantic cache invalidation did not delete the cached reply");
+        }
+
+        return {
+          skipped: false as const,
+          first: firstCacheChat.cacheStatus,
+          second: secondCacheChat.cacheStatus,
+          invalidatedCacheEntries
+        };
       } finally {
         restoreEnv("BOOT_SEMANTIC_CACHE_ENABLED", originalSemanticCacheEnabled);
         restoreEnv("BOOT_SEMANTIC_CACHE_NAMESPACE", originalSemanticCacheNamespace);
         restoreEnv("BOOT_SEMANTIC_CACHE_TIMEOUT_MS", originalSemanticCacheTimeout);
       }
     })();
+
+    await replyAsMakoto(
+      {
+        from: {
+          id: secondBotUserNumericId,
+          is_bot: false,
+          first_name: "E2E Second Member",
+          username: "e2e_second_bot_user",
+          language_code: "zh"
+        },
+        chat: { id: -1009876543210, type: "supergroup" },
+        message: { message_id: 900 }
+      } as never,
+      "这是群会话归属生命周期验证。"
+    );
+    const sharedConversationScope = resolveBootConversationScope({
+      protocol: "telegram",
+      userId: botTelegramUserId,
+      sourceChatId: "-1009876543210",
+      sourceChatType: "supergroup"
+    }).scopeKey;
+    await sql`update conversations set telegram_user_id = ${botTelegramUserId} where scope_key = ${sharedConversationScope}`;
+    await sql`delete from telegram_users where telegram_id = ${botTelegramUserId}`;
+    const sharedConversationRows = await sql`
+      select
+        conversation.telegram_user_id,
+        count(message.id)::int as remaining_message_count
+      from conversations as conversation
+      left join messages as message on message.conversation_id = conversation.id
+      where conversation.scope_key = ${sharedConversationScope}
+      group by conversation.id
+    `;
+    const sharedConversationAfterOwnerDelete = sharedConversationRows[0] as
+      | { telegram_user_id: string | null; remaining_message_count: number }
+      | undefined;
+    if (
+      !sharedConversationAfterOwnerDelete ||
+      sharedConversationAfterOwnerDelete.telegram_user_id !== null ||
+      Number(sharedConversationAfterOwnerDelete.remaining_message_count) < 2
+    ) {
+      throw new Error("Deleting a former group conversation owner must preserve the shared conversation and other members' turns");
+    }
 
     console.log(
       JSON.stringify(
@@ -1031,6 +1291,9 @@ async function main() {
           responsesPromptCount: relayState.responsesPrompts.length,
           summaryCount: relayState.summaries.length,
           semanticCacheStatus: semanticCacheSmoke.skipped ? "skipped" : semanticCacheSmoke.second,
+          semanticCacheInvalidated:
+            semanticCacheSmoke.skipped || semanticCacheSmoke.invalidatedCacheEntries > 0,
+          sharedConversationSurvivedOwnerDeletion: true,
           lastSuperAdminGuardStatus,
           atomicSettingsGuardStatus: failedAtomicSettingsResponse.status,
           pendingGroupInitiallyBlocked: !pendingGroupAccess.allowed,
@@ -1046,7 +1309,8 @@ async function main() {
       )
     );
   } finally {
-    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId})`;
+    await sql`delete from conversations where chat_id in ('-1009876543210', '-1009876543211')`;
+    await sql`delete from telegram_users where telegram_id in (${apiTelegramUserId}, ${semanticCacheTelegramUserId}, ${botTelegramUserId}, ${secondBotTelegramUserId})`;
     await sql`delete from telegram_command_permissions where command in ('start', 'model') and (chat_id is null or chat_id = '-1001234567890')`;
     await sql`delete from telegram_chats where chat_id = '-1001234567890'`;
     await sql`delete from admin_users where username = ${adminUsername}`;
@@ -1076,9 +1340,16 @@ async function waitForConversationExactCacheHit(input: Parameters<typeof runBoot
   let lastStatus = "unknown";
 
   while (Date.now() < deadline) {
+    const scopeKey = resolveBootConversationScope(input).scopeKey;
     const [history, memories, bootConfig, searchConfig] = await Promise.all([
-      getRecentMessages(input.userId, 12),
-      listMemories({ telegramUserId: input.userId, limit: 10, offset: 0 }),
+      getRecentMessages(scopeKey, 12),
+      listMemories({
+        telegramUserId: input.userId,
+        sourceChatId: input.sourceChatId ?? null,
+        sourceThreadId: input.sourceThreadId ?? null,
+        limit: 10,
+        offset: 0
+      }),
       getEffectiveBootConfig(),
       getEffectiveBootSearchConfig()
     ]);
@@ -1087,12 +1358,14 @@ async function waitForConversationExactCacheHit(input: Parameters<typeof runBoot
       userId: input.userId,
       chatModel: bootConfig.BOOT_CHAT_MODEL,
       embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL,
+      personaHash: bootConfig.PERSONA_HASH,
+      userDisplayName: input.firstName ?? input.username ?? null,
       searchProvider: searchConfig.BOOT_SEARCH_PROVIDER,
       history,
       memories
     });
     const lookup = await lookupConversationCache({
-      scope: conversationCacheScope(input),
+      scope: conversationCacheScope({ scopeKey }),
       contextFingerprint,
       content: input.content,
       config: getSemanticCacheConfig(process.env)

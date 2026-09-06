@@ -98,6 +98,9 @@ export const telegramUsers = pgTable("telegram_users", {
   firstName: text("first_name"),
   lastName: text("last_name"),
   languageCode: text("language_code"),
+  privacyMode: text("privacy_mode", { enum: ["normal", "isolated", "off"] })
+    .default("normal")
+    .notNull(),
   firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
@@ -113,12 +116,16 @@ export const telegramChats = pgTable(
     policy: text("policy", { enum: ["allow_all_commands", "commands_only", "read_only", "disabled"] })
       .default("allow_all_commands")
       .notNull(),
+    replyMode: text("reply_mode", { enum: ["mention_only", "social", "quiet"] })
+      .default("social")
+      .notNull(),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
   (table) => [
     index("telegram_chats_status_idx").on(table.status),
     index("telegram_chats_type_idx").on(table.type),
+    index("telegram_chats_reply_mode_idx").on(table.replyMode),
     index("telegram_chats_updated_idx").on(table.updatedAt)
   ]
 );
@@ -167,14 +174,23 @@ export const conversations = pgTable(
   "conversations",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    telegramUserId: text("telegram_user_id")
-      .notNull()
-      .references(() => telegramUsers.telegramId, { onDelete: "cascade" }),
+    telegramUserId: text("telegram_user_id").references(() => telegramUsers.telegramId, { onDelete: "set null" }),
+    protocol: text("protocol").default("telegram").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    chatId: text("chat_id"),
+    threadId: text("thread_id"),
+    personaId: text("persona_id"),
+    personaVersion: integer("persona_version"),
+    personaHash: text("persona_hash"),
     title: text("title").default("Telegram chat").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
   },
-  (table) => [index("conversations_user_idx").on(table.telegramUserId)]
+  (table) => [
+    index("conversations_user_idx").on(table.telegramUserId),
+    uniqueIndex("conversations_scope_key_idx").on(table.scopeKey),
+    index("conversations_chat_thread_idx").on(table.protocol, table.chatId, table.threadId)
+  ]
 );
 
 export const messages = pgTable(
@@ -186,6 +202,7 @@ export const messages = pgTable(
       .notNull()
       .references(() => telegramUsers.telegramId, { onDelete: "cascade" }),
     telegramChatId: text("telegram_chat_id"),
+    telegramThreadId: text("telegram_thread_id"),
     telegramMessageId: bigint("telegram_message_id", { mode: "number" }),
     role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
     content: text("content").notNull(),
@@ -209,14 +226,35 @@ export const memories = pgTable(
       .references(() => telegramUsers.telegramId, { onDelete: "cascade" }),
     summary: text("summary").notNull(),
     importance: integer("importance").default(5).notNull(),
-    embedding: halfvec("embedding", { dimensions: 3072 }).notNull(),
+    embedding: halfvec("embedding", { dimensions: 3072 }),
+    embeddingLocal: halfvec("embedding_local", { dimensions: 512 }),
+    embeddingModel: text("embedding_model"),
+    embeddingRevision: text("embedding_revision"),
+    embeddingDimensions: integer("embedding_dimensions"),
+    embeddingNormalized: boolean("embedding_normalized").default(true).notNull(),
+    contentHash: text("content_hash"),
+    embeddedAt: timestamp("embedded_at", { withTimezone: true }),
+    embeddingStatus: text("embedding_status", { enum: ["pending", "ready", "failed"] }).default("pending").notNull(),
+    scope: text("scope", { enum: ["persona_global", "chat_shared", "user_private", "user_in_chat"] })
+      .default("user_private")
+      .notNull(),
+    kind: text("kind", { enum: ["fact", "event", "preference"] }).default("fact").notNull(),
+    sourceChatId: text("source_chat_id"),
+    sourceThreadId: text("source_thread_id"),
+    subjectUserId: text("subject_user_id"),
+    confidence: integer("confidence").default(70).notNull(),
+    supersedesId: uuid("supersedes_id"),
     sourceMessageId: uuid("source_message_id").references(() => messages.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    lastAccessedAt: timestamp("last_accessed_at", { withTimezone: true })
+    lastAccessedAt: timestamp("last_accessed_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true })
   },
   (table) => [
     index("memories_user_idx").on(table.telegramUserId),
-    index("memories_embedding_hnsw_idx").using("hnsw", table.embedding.op("halfvec_cosine_ops"))
+    index("memories_scope_idx").on(table.scope, table.sourceChatId, table.telegramUserId),
+    index("memories_content_hash_idx").on(table.contentHash),
+    index("memories_embedding_hnsw_idx").using("hnsw", table.embedding.op("halfvec_cosine_ops")),
+    index("memories_embedding_local_hnsw_idx").using("hnsw", table.embeddingLocal.op("halfvec_cosine_ops"))
   ]
 );
 

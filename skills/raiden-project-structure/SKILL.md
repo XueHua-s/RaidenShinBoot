@@ -13,7 +13,7 @@ Use this skill before making structural decisions, adding dependencies, or choos
   - Owns shared Zod schemas, persona prompt, memory context formatting, and Vercel AI SDK v6 boot helpers.
   - Import from `@raiden/shared` for browser-safe schemas and from `@raiden/shared/boot` only in Node/server contexts.
 - `packages/database`
-  - Owns Drizzle schema, PostgreSQL client, repositories, migrations, `pgvector` `halfvec(3072)`, and HNSW memory search.
+  - Owns Drizzle schema, PostgreSQL client, repositories, migrations, active `pgvector` `halfvec(512)`, legacy `halfvec(3072)`, and HNSW memory search.
   - Schema changes start in `src/schema.ts`, then run `pnpm db:generate`.
 - `packages/boot`
   - Owns cross-entry conversation orchestration: user identity, message persistence, embeddings, memory search, web search, Makoto reply generation, and durable memory creation.

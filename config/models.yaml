@@ -1,0 +1,57 @@
+version: 1
+
+providers:
+  relay:
+    kind: openai-compatible
+    baseUrlEnv: BOOT_BASE_URL
+    chatBaseUrlEnv: BOOT_CHAT_BASE_URL
+    imageBaseUrlEnv: BOOT_IMAGE_BASE_URL
+    apiKeyEnv: BOOT_API_KEY
+    chatApiKeyEnv: BOOT_CHAT_API_KEY
+    imageApiKeyEnv: BOOT_IMAGE_API_KEY
+    protocol:
+      chatEndpoint: /chat/completions
+      responsesEndpoint: /responses
+      streamRequired: true
+    catalog:
+      endpoint: /models
+      refreshSeconds: 900
+      staleAfterSeconds: 86400
+
+catalog:
+  allow: discovered
+  capabilityOverrides:
+    chatgpt-image-latest: [image]
+    gpt-image-2-codex: [image]
+    imagegen: [image]
+
+routing:
+  language:
+    provider: relay
+    defaults:
+      conversation: gpt-5.5
+      summarization: gpt-5.5
+      memoryExtraction: gpt-5.5
+      toolReasoning: gpt-5.5
+    fallbacks: []
+    userSelectable: discovered-chat
+  image:
+    provider: relay
+    default: gpt-image-2-codex
+    userSelectable: [gpt-image-2-codex]
+    async: true
+
+embedding:
+  kind: local-openai-compatible
+  baseUrl: http://127.0.0.1:8080/v1
+  baseUrlEnv: BOOT_EMBEDDING_BASE_URL
+  apiKeyEnv: BOOT_EMBEDDING_API_KEY
+  model: BAAI/bge-small-zh-v1.5
+  dimensions: 512
+  normalized: true
+  queryPrefix: "为这个句子生成表示以用于检索相关文章："
+
+probes:
+  beforePublish: true
+  cacheSeconds: 300
+  chatPrompt: 只回复 OK

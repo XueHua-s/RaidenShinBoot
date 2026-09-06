@@ -10,7 +10,7 @@
 ## Project Structure
 
 - `packages/shared`: 共享 Zod schema、人格 prompt、Vercel AI SDK v6 boot 客户端。
-- `packages/database`: PostgreSQL + Drizzle schema、pgvector `halfvec(3072)`、HNSW 索引和仓储层。
+- `packages/database`: PostgreSQL + Drizzle schema、当前本地 embedding 的 `halfvec(512)`、迁移期保留的旧 `halfvec(3072)`、HNSW 索引和仓储层。
 - `packages/boot`: 跨入口聊天编排层，复用 database/shared 能力处理用户身份、消息、embedding、长期记忆、搜索和回复生成。
 - `packages/server`: Hono API、链式路由、`AppType` 导出、HTTP 鉴权和路由编排。
 - `packages/bot`: grammY Telegram bot，复用 `packages/boot` 的人格、长期记忆、搜索和数据库链路。
@@ -44,7 +44,7 @@
 - 实现功能或修复问题时，优先使用目标 package 的 `package.json` 已有依赖和仓库内现有工具，不要在未确认必要性前引入新依赖。
 - 新增依赖前先检查目标 `package.json`、现有 `packages/*` 封装和本地工具，优先复用已有实现。
 - Hono API 的前后端类型契约必须通过 `packages/server/src/app.ts` 导出的 `AppType` 传递给前端，不要手写重复 API 类型。
-- 数据库结构变更必须同步 `packages/database/src/schema.ts` 和 Drizzle 迁移；涉及向量记忆时确认 `halfvec(3072)`、embedding 模型维度和 HNSW 索引一致。
+- 数据库结构变更必须同步 `packages/database/src/schema.ts` 和 Drizzle 迁移；涉及向量记忆时确认当前 `halfvec(512)`、本地 embedding 模型维度和 HNSW 索引一致。旧 `halfvec(3072)` 仅用于迁移兼容。
 - bot 与 server 的聊天主链路应复用同一套 shared/database 能力，不要在两端分叉实现人格、记忆或 embedding 逻辑。
 - 不要手改 `dist/`、缓存目录、构建产物或 node_modules。
 - 不要提交真实密钥、Telegram token、数据库密码、relay key 或敏感环境变量。

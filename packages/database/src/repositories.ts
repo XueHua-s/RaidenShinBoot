@@ -32,11 +32,30 @@ export type PaginationInput = {
   offset?: number;
 };
 
+export type ConversationScopeInput = {
+  protocol: string;
+  scopeKey: string;
+  telegramUserId: string | null;
+  chatId?: string | null;
+  threadId?: string | null;
+  personaId?: string | null;
+  personaVersion?: number | null;
+  personaHash?: string | null;
+};
+
 export type MemorySearchHit = {
   id: string;
   telegramUserId: string;
   summary: string;
   importance: number;
+  scope: "persona_global" | "chat_shared" | "user_private" | "user_in_chat";
+  kind: "fact" | "event" | "preference";
+  sourceChatId: string | null;
+  sourceThreadId: string | null;
+  subjectUserId: string | null;
+  confidence: number;
+  embeddingModel: string | null;
+  embeddingDimensions: number | null;
   sourceMessageId: string | null;
   createdAt: Date;
   lastAccessedAt: Date | null;
@@ -78,6 +97,8 @@ function toIsoDate<
     lastLoginAt?: Date | null;
     expiresAt?: Date;
     revokedAt?: Date | null;
+    embeddedAt?: Date | null;
+    deletedAt?: Date | null;
   }
 >(row: T) {
   return {
@@ -88,7 +109,9 @@ function toIsoDate<
     lastAccessedAt: row.lastAccessedAt?.toISOString() ?? null,
     lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
     expiresAt: row.expiresAt?.toISOString(),
-    revokedAt: row.revokedAt?.toISOString() ?? null
+    revokedAt: row.revokedAt?.toISOString() ?? null,
+    embeddedAt: row.embeddedAt?.toISOString() ?? null,
+    deletedAt: row.deletedAt?.toISOString() ?? null
   };
 }
 
@@ -573,6 +596,25 @@ export async function upsertTelegramUser(input: NewTelegramUser) {
   return user;
 }
 
+export async function getTelegramUser(telegramId: string) {
+  const db = getDatabase();
+  const [user] = await db.select().from(telegramUsers).where(eq(telegramUsers.telegramId, telegramId)).limit(1);
+  return user ?? null;
+}
+
+export async function updateTelegramUserPrivacyMode(
+  telegramId: string,
+  privacyMode: "normal" | "isolated" | "off"
+) {
+  const db = getDatabase();
+  const [user] = await db
+    .update(telegramUsers)
+    .set({ privacyMode, updatedAt: new Date() })
+    .where(eq(telegramUsers.telegramId, telegramId))
+    .returning();
+  return user ?? null;
+}
+
 function defaultChatStatus(type: NewTelegramChat["type"]) {
   return type === "private" ? "approved" : "pending";
 }
@@ -648,7 +690,7 @@ export async function getTelegramChat(chatId: string) {
 
 export async function updateTelegramChat(
   chatId: string,
-  input: Partial<Pick<NewTelegramChat, "status" | "policy" | "title" | "username">>
+  input: Partial<Pick<NewTelegramChat, "status" | "policy" | "replyMode" | "title" | "username">>
 ) {
   const db = getDatabase();
   const before = await getTelegramChat(chatId);
@@ -839,20 +881,59 @@ export async function countTelegramUsers() {
   return row?.count ?? 0;
 }
 
-export async function ensureConversation(telegramUserId: string) {
+export async function ensureConversation(input: ConversationScopeInput) {
   const db = getDatabase();
   const [existing] = await db
     .select()
     .from(conversations)
-    .where(eq(conversations.telegramUserId, telegramUserId))
-    .orderBy(desc(conversations.updatedAt))
+    .where(eq(conversations.scopeKey, input.scopeKey))
     .limit(1);
 
   if (existing) {
+    if (
+      existing.personaId !== input.personaId ||
+      existing.personaVersion !== input.personaVersion ||
+      existing.personaHash !== input.personaHash
+    ) {
+      const [updated] = await db
+        .update(conversations)
+        .set({
+          personaId: input.personaId ?? null,
+          personaVersion: input.personaVersion ?? null,
+          personaHash: input.personaHash ?? null,
+          updatedAt: new Date()
+        })
+        .where(eq(conversations.id, existing.id))
+        .returning();
+      return updated ?? existing;
+    }
     return existing;
   }
 
-  const [conversation] = await db.insert(conversations).values({ telegramUserId }).returning();
+  const [conversation] = await db
+    .insert(conversations)
+    .values({
+      telegramUserId: input.telegramUserId,
+      protocol: input.protocol,
+      scopeKey: input.scopeKey,
+      chatId: input.chatId ?? null,
+      threadId: input.threadId ?? null,
+      personaId: input.personaId ?? null,
+      personaVersion: input.personaVersion ?? null,
+      personaHash: input.personaHash ?? null
+    })
+    .onConflictDoNothing({ target: conversations.scopeKey })
+    .returning();
+  if (!conversation) {
+    const [racedConversation] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.scopeKey, input.scopeKey))
+      .limit(1);
+    if (racedConversation) {
+      return racedConversation;
+    }
+  }
   if (!conversation) {
     throw new Error("Failed to create conversation");
   }
@@ -860,14 +941,23 @@ export async function ensureConversation(telegramUserId: string) {
   return conversation;
 }
 
-export async function saveMessage(input: Omit<NewMessage, "conversationId"> & { conversationId?: string | null }) {
+export async function saveMessage(
+  input: Omit<NewMessage, "conversationId"> & {
+    conversationId?: string | null;
+    conversationScope?: ConversationScopeInput;
+  }
+) {
   const db = getDatabase();
-  const conversationId = input.conversationId ?? (await ensureConversation(input.telegramUserId)).id;
+  if (!input.conversationId && !input.conversationScope) {
+    throw new Error("conversationId or conversationScope is required");
+  }
+  const conversationId = input.conversationId ?? (await ensureConversation(input.conversationScope as ConversationScopeInput)).id;
+  const { conversationScope: _conversationScope, ...messageInput } = input;
 
   const [message] = await db
     .insert(messages)
     .values({
-      ...input,
+      ...messageInput,
       conversationId
     })
     .returning();
@@ -882,8 +972,10 @@ export async function saveMessage(input: Omit<NewMessage, "conversationId"> & { 
 }
 
 export async function saveConversationTurn(input: {
+  scope: ConversationScopeInput;
   telegramUserId: string;
   telegramChatId?: string | null;
+  telegramThreadId?: string | null;
   telegramMessageId?: number | null;
   userContent: string;
   assistantContent: string;
@@ -896,21 +988,54 @@ export async function saveConversationTurn(input: {
     const [existing] = await tx
       .select()
       .from(conversations)
-      .where(eq(conversations.telegramUserId, input.telegramUserId))
-      .orderBy(desc(conversations.updatedAt))
+      .where(eq(conversations.scopeKey, input.scope.scopeKey))
       .limit(1);
 
-    const conversation =
-      existing ??
-      (
-        await tx
-          .insert(conversations)
-          .values({ telegramUserId: input.telegramUserId })
-          .returning()
-      )[0];
+    let conversation = existing;
+    if (!conversation) {
+      [conversation] = await tx
+        .insert(conversations)
+        .values({
+          telegramUserId: input.scope.telegramUserId,
+          protocol: input.scope.protocol,
+          scopeKey: input.scope.scopeKey,
+          chatId: input.scope.chatId ?? null,
+          threadId: input.scope.threadId ?? null,
+          personaId: input.scope.personaId ?? null,
+          personaVersion: input.scope.personaVersion ?? null,
+          personaHash: input.scope.personaHash ?? null
+        })
+        .onConflictDoNothing({ target: conversations.scopeKey })
+        .returning();
+      if (!conversation) {
+        [conversation] = await tx
+          .select()
+          .from(conversations)
+          .where(eq(conversations.scopeKey, input.scope.scopeKey))
+          .limit(1);
+      }
+    }
 
     if (!conversation) {
       throw new Error("Failed to create conversation");
+    }
+
+    if (
+      conversation.personaId !== input.scope.personaId ||
+      conversation.personaVersion !== input.scope.personaVersion ||
+      conversation.personaHash !== input.scope.personaHash
+    ) {
+      const [updatedConversation] = await tx
+        .update(conversations)
+        .set({
+          personaId: input.scope.personaId ?? null,
+          personaVersion: input.scope.personaVersion ?? null,
+          personaHash: input.scope.personaHash ?? null,
+          updatedAt: new Date()
+        })
+        .where(eq(conversations.id, conversation.id))
+        .returning();
+      conversation = updatedConversation ?? conversation;
     }
 
     if (input.telegramMessageId !== null && input.telegramMessageId !== undefined) {
@@ -959,6 +1084,7 @@ export async function saveConversationTurn(input: {
         conversationId: conversation.id,
         telegramUserId: input.telegramUserId,
         telegramChatId: input.telegramChatId ?? null,
+        telegramThreadId: input.telegramThreadId ?? null,
         telegramMessageId: input.telegramMessageId ?? null,
         role: "user",
         content: input.userContent,
@@ -970,6 +1096,8 @@ export async function saveConversationTurn(input: {
       .values({
         conversationId: conversation.id,
         telegramUserId: input.telegramUserId,
+        telegramChatId: input.telegramChatId ?? null,
+        telegramThreadId: input.telegramThreadId ?? null,
         role: "assistant",
         content: input.assistantContent,
         createdAt: assistantMessageCreatedAt
@@ -1065,36 +1193,77 @@ export async function countMessages(telegramUserId?: string) {
   return row?.count ?? 0;
 }
 
-export async function getRecentMessages(telegramUserId: string, limit = 12) {
+export async function getRecentMessages(scopeKey: string, limit = 12) {
   const db = getDatabase();
   const rows = await db
     .select()
     .from(messages)
-    .where(eq(messages.telegramUserId, telegramUserId))
+    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+    .where(eq(conversations.scopeKey, scopeKey))
     .orderBy(
       desc(messages.createdAt),
       desc(sql<number>`case ${messages.role} when 'assistant' then 2 when 'system' then 1 else 0 end`)
     )
     .limit(limit);
 
-  return rows.reverse();
+  return rows.reverse().map((row) => row.messages);
+}
+
+export async function clearConversationMessages(scopeKey: string) {
+  const db = getDatabase();
+  const [conversation] = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(eq(conversations.scopeKey, scopeKey))
+    .limit(1);
+  if (!conversation) {
+    return 0;
+  }
+  const deleted = await db.delete(messages).where(eq(messages.conversationId, conversation.id)).returning({ id: messages.id });
+  return deleted.length;
 }
 
 export async function createMemory(input: {
   telegramUserId: string;
   summary: string;
   embedding: number[];
+  embeddingModel: string;
+  embeddingRevision?: string | null;
   importance?: number;
+  scope?: "persona_global" | "chat_shared" | "user_private" | "user_in_chat";
+  kind?: "fact" | "event" | "preference";
+  sourceChatId?: string | null;
+  sourceThreadId?: string | null;
+  subjectUserId?: string | null;
+  confidence?: number;
+  supersedesId?: string | null;
   sourceMessageId?: string | null;
 }) {
+  if (input.embedding.length !== 512) {
+    throw new Error(`Local memory embedding must contain 512 dimensions; received ${input.embedding.length}`);
+  }
   const db = getDatabase();
   const [memory] = await db
     .insert(memories)
     .values({
       telegramUserId: input.telegramUserId,
       summary: input.summary,
-      embedding: input.embedding,
+      embeddingLocal: input.embedding,
+      embeddingModel: input.embeddingModel,
+      embeddingRevision: input.embeddingRevision ?? null,
+      embeddingDimensions: input.embedding.length,
+      embeddingNormalized: true,
+      contentHash: createHash("sha256").update(input.summary).digest("hex"),
+      embeddedAt: new Date(),
+      embeddingStatus: "ready",
       importance: input.importance ?? 5,
+      scope: input.scope ?? "user_private",
+      kind: input.kind ?? "fact",
+      sourceChatId: input.sourceChatId ?? null,
+      sourceThreadId: input.sourceThreadId ?? null,
+      subjectUserId: input.subjectUserId ?? input.telegramUserId,
+      confidence: input.confidence ?? 70,
+      supersedesId: input.supersedesId ?? null,
       sourceMessageId: input.sourceMessageId ?? null
     })
     .returning();
@@ -1106,7 +1275,14 @@ export async function createMemory(input: {
   return memory;
 }
 
-export async function listMemories(input: PaginationInput & { telegramUserId?: string | undefined } = defaultPagination) {
+export async function listMemories(
+  input: PaginationInput & {
+    telegramUserId?: string | undefined;
+    sourceChatId?: string | null | undefined;
+    sourceThreadId?: string | null | undefined;
+    includeDeleted?: boolean | undefined;
+  } = defaultPagination
+) {
   const db = getDatabase();
   const limit = input.limit ?? defaultPagination.limit;
   const offset = input.offset ?? defaultPagination.offset;
@@ -1117,12 +1293,41 @@ export async function listMemories(input: PaginationInput & { telegramUserId?: s
       telegramUserId: memories.telegramUserId,
       summary: memories.summary,
       importance: memories.importance,
+      scope: memories.scope,
+      kind: memories.kind,
+      sourceChatId: memories.sourceChatId,
+      sourceThreadId: memories.sourceThreadId,
+      subjectUserId: memories.subjectUserId,
+      confidence: memories.confidence,
+      embeddingModel: memories.embeddingModel,
+      embeddingRevision: memories.embeddingRevision,
+      embeddingDimensions: memories.embeddingDimensions,
+      embeddingNormalized: memories.embeddingNormalized,
+      embeddingStatus: memories.embeddingStatus,
+      contentHash: memories.contentHash,
+      embeddedAt: memories.embeddedAt,
       sourceMessageId: memories.sourceMessageId,
       createdAt: memories.createdAt,
-      lastAccessedAt: memories.lastAccessedAt
+      lastAccessedAt: memories.lastAccessedAt,
+      deletedAt: memories.deletedAt
     })
     .from(memories)
-    .where(input.telegramUserId ? eq(memories.telegramUserId, input.telegramUserId) : undefined)
+    .where(
+      and(
+        input.telegramUserId ? eq(memories.telegramUserId, input.telegramUserId) : undefined,
+        input.sourceChatId === undefined
+          ? undefined
+          : input.sourceChatId === null
+            ? isNull(memories.sourceChatId)
+            : eq(memories.sourceChatId, input.sourceChatId),
+        input.sourceThreadId === undefined
+          ? undefined
+          : input.sourceThreadId === null
+            ? isNull(memories.sourceThreadId)
+            : eq(memories.sourceThreadId, input.sourceThreadId),
+        input.includeDeleted ? undefined : isNull(memories.deletedAt)
+      )
+    )
     .orderBy(desc(memories.createdAt))
     .limit(limit)
     .offset(offset);
@@ -1135,7 +1340,7 @@ export async function countMemories(telegramUserId?: string) {
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(memories)
-    .where(telegramUserId ? eq(memories.telegramUserId, telegramUserId) : undefined);
+    .where(and(telegramUserId ? eq(memories.telegramUserId, telegramUserId) : undefined, isNull(memories.deletedAt)));
 
   return row?.count ?? 0;
 }
@@ -1143,14 +1348,58 @@ export async function countMemories(telegramUserId?: string) {
 export async function searchMemories(input: {
   telegramUserId: string;
   embedding: number[];
+  sourceChatId?: string | null;
+  sourceThreadId?: string | null;
+  includePrivate?: boolean;
+  privateSourceChatId?: string | null;
+  privateSourceThreadId?: string | null;
   limit?: number;
   maxDistance?: number;
   touchLastAccessed?: boolean;
 }) {
+  if (input.embedding.length !== 512) {
+    throw new Error(`Local query embedding must contain 512 dimensions; received ${input.embedding.length}`);
+  }
   const db = getDatabase();
   const limit = input.limit ?? 5;
   const literal = vectorLiteral(input.embedding);
-  const distance = sql<number>`${memories.embedding} <=> ${literal}::halfvec`;
+  const distance = sql<number>`${memories.embeddingLocal} <=> ${literal}::halfvec`;
+  const visibility = [eq(memories.scope, "persona_global")];
+  if (input.includePrivate !== false) {
+    visibility.push(
+      and(
+        eq(memories.scope, "user_private"),
+        eq(memories.telegramUserId, input.telegramUserId),
+        input.privateSourceChatId === undefined
+          ? undefined
+          : input.privateSourceChatId === null
+            ? isNull(memories.sourceChatId)
+            : eq(memories.sourceChatId, input.privateSourceChatId),
+        input.privateSourceThreadId === undefined
+          ? undefined
+          : input.privateSourceThreadId === null
+            ? isNull(memories.sourceThreadId)
+            : eq(memories.sourceThreadId, input.privateSourceThreadId)
+      )!
+    );
+  }
+  if (input.sourceChatId) {
+    const threadCondition =
+      input.sourceThreadId === undefined
+        ? undefined
+        : input.sourceThreadId === null
+          ? isNull(memories.sourceThreadId)
+          : eq(memories.sourceThreadId, input.sourceThreadId);
+    visibility.push(
+      and(
+        eq(memories.scope, "user_in_chat"),
+        eq(memories.telegramUserId, input.telegramUserId),
+        eq(memories.sourceChatId, input.sourceChatId),
+        threadCondition
+      )!,
+      and(eq(memories.scope, "chat_shared"), eq(memories.sourceChatId, input.sourceChatId), threadCondition)!
+    );
+  }
 
   const rows = await db
     .select({
@@ -1158,6 +1407,14 @@ export async function searchMemories(input: {
       telegramUserId: memories.telegramUserId,
       summary: memories.summary,
       importance: memories.importance,
+      scope: memories.scope,
+      kind: memories.kind,
+      sourceChatId: memories.sourceChatId,
+      sourceThreadId: memories.sourceThreadId,
+      subjectUserId: memories.subjectUserId,
+      confidence: memories.confidence,
+      embeddingModel: memories.embeddingModel,
+      embeddingDimensions: memories.embeddingDimensions,
       sourceMessageId: memories.sourceMessageId,
       createdAt: memories.createdAt,
       lastAccessedAt: memories.lastAccessedAt,
@@ -1166,7 +1423,9 @@ export async function searchMemories(input: {
     .from(memories)
     .where(
       and(
-        eq(memories.telegramUserId, input.telegramUserId),
+        isNull(memories.deletedAt),
+        sql`${memories.embeddingLocal} is not null`,
+        or(...visibility),
         input.maxDistance === undefined ? undefined : sql`${distance} <= ${input.maxDistance}`
       )
     )
@@ -1189,4 +1448,60 @@ export async function searchMemories(input: {
     ...row,
     score: 1 - row.distance
   })) satisfies MemorySearchHit[];
+}
+
+export async function softDeleteMemories(input: { telegramUserId: string; sourceChatId?: string | null }) {
+  const db = getDatabase();
+  const deleted = await db
+    .update(memories)
+    .set({ deletedAt: new Date() })
+    .where(
+      and(
+        eq(memories.telegramUserId, input.telegramUserId),
+        input.sourceChatId === undefined
+          ? undefined
+          : input.sourceChatId === null
+            ? isNull(memories.sourceChatId)
+            : eq(memories.sourceChatId, input.sourceChatId),
+        isNull(memories.deletedAt)
+      )
+    )
+    .returning({ id: memories.id });
+  return deleted.length;
+}
+
+export async function listMemoriesPendingLocalEmbedding(limit = 100) {
+  const db = getDatabase();
+  return db
+    .select({ id: memories.id, summary: memories.summary })
+    .from(memories)
+    .where(and(isNull(memories.deletedAt), isNull(memories.embeddingLocal)))
+    .orderBy(asc(memories.createdAt))
+    .limit(limit);
+}
+
+export async function updateMemoryLocalEmbedding(input: {
+  id: string;
+  embedding: number[];
+  embeddingModel: string;
+  embeddingRevision?: string | null;
+}) {
+  if (input.embedding.length !== 512) {
+    throw new Error(`Local memory embedding must contain 512 dimensions; received ${input.embedding.length}`);
+  }
+  const db = getDatabase();
+  const [memory] = await db
+    .update(memories)
+    .set({
+      embeddingLocal: input.embedding,
+      embeddingModel: input.embeddingModel,
+      embeddingRevision: input.embeddingRevision ?? null,
+      embeddingDimensions: 512,
+      embeddingNormalized: true,
+      embeddedAt: new Date(),
+      embeddingStatus: "ready"
+    })
+    .where(eq(memories.id, input.id))
+    .returning({ id: memories.id });
+  return memory ?? null;
 }

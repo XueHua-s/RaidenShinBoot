@@ -1,6 +1,6 @@
 import { createClient, type RedisClientType } from "redis";
 import * as robot3Module from "robot3";
-import { fixedBootEmbeddingModel } from "@raiden/shared/boot";
+import { getModelConfiguration } from "@raiden/shared/model-config";
 import {
   conversationCachePolicyVersion,
   isStandaloneCacheCandidate,
@@ -43,6 +43,8 @@ export type SemanticCacheConfig = {
   maxCandidates: number;
   indexName: string;
   operationTimeoutMs: number;
+  embeddingDimensions: number;
+  embeddingModel: string;
 };
 
 export type ConversationCacheHit = {
@@ -71,6 +73,7 @@ type LookupContext = {
 };
 
 type ConversationCacheWriteInput = {
+  userId: string;
   scope: string;
   contextFingerprint: string;
   content: string;
@@ -91,8 +94,6 @@ type DoneEvent<T> = { type: "done"; data: T };
 type ErrorEvent = { type: "error"; error: unknown };
 
 const defaultCachePrefix = "boot:semantic-cache";
-const requiredEmbeddingDimensions = 3072;
-
 let redisClientPromise: Promise<RedisClientType> | null = null;
 let redisClientUrl: string | null = null;
 let redisClientGeneration = 0;
@@ -205,10 +206,10 @@ const writeMachine = createMachine(
       ),
       immediate(
         "skipped",
-        guard((context: WriteContext) => context.embedding.length !== requiredEmbeddingDimensions),
+        guard((context: WriteContext) => context.embedding.length !== context.config.embeddingDimensions),
         reduce((context: WriteContext) => ({
           ...context,
-          result: writeSkipped(`embedding must have ${requiredEmbeddingDimensions} dimensions`)
+          result: writeSkipped(`embedding must have ${context.config.embeddingDimensions} dimensions`)
         }))
       ),
       immediate("writing")
@@ -242,6 +243,15 @@ const writeMachine = createMachine(
 export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): SemanticCacheConfig {
   const redisUrl = optionalString(env.REDIS_URL);
   const prefix = optionalString(env.BOOT_SEMANTIC_CACHE_PREFIX) ?? defaultCachePrefix;
+  const modelConfiguration = getModelConfiguration(env);
+  const embeddingModel = optionalString(env.BOOT_EMBEDDING_MODEL) ?? modelConfiguration.embedding.model;
+  const configuredDimensions = optionalString(env.BOOT_EMBEDDING_DIMENSIONS);
+  if (configuredDimensions && Number(configuredDimensions) !== modelConfiguration.embedding.dimensions) {
+    throw new Error(
+      `BOOT_EMBEDDING_DIMENSIONS must match the configured local embedding dimension (${modelConfiguration.embedding.dimensions})`
+    );
+  }
+  const embeddingDimensions = modelConfiguration.embedding.dimensions;
   return {
     enabled: envFlag(env.BOOT_SEMANTIC_CACHE_ENABLED, Boolean(redisUrl)),
     l1Enabled: envFlag(env.BOOT_SEMANTIC_CACHE_L1_ENABLED, true),
@@ -250,12 +260,14 @@ export function getSemanticCacheConfig(env: NodeJS.ProcessEnv = process.env): Se
     prefix,
     namespace:
       optionalString(env.BOOT_SEMANTIC_CACHE_NAMESPACE) ??
-      stableHash([env.BOOT_CHAT_MODEL ?? "", fixedBootEmbeddingModel, conversationCachePolicyVersion]).slice(0, 16),
+      stableHash([env.BOOT_CHAT_MODEL ?? "", embeddingModel, String(embeddingDimensions), conversationCachePolicyVersion]).slice(0, 16),
     ttlSeconds: positiveInteger(env.BOOT_SEMANTIC_CACHE_TTL_SECONDS, 86_400, 2_592_000),
     similarityThreshold: boundedNumber(env.BOOT_SEMANTIC_CACHE_THRESHOLD, 0.92, 0.5, 0.99),
     maxCandidates: positiveInteger(env.BOOT_SEMANTIC_CACHE_MAX_CANDIDATES, 8, 50),
-    indexName: optionalString(env.BOOT_SEMANTIC_CACHE_INDEX) ?? `${sanitizeIndexName(prefix)}:v2:idx`,
-    operationTimeoutMs: positiveInteger(env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS, 750, 10_000)
+    indexName: optionalString(env.BOOT_SEMANTIC_CACHE_INDEX) ?? `${sanitizeIndexName(prefix)}:v5:idx`,
+    operationTimeoutMs: positiveInteger(env.BOOT_SEMANTIC_CACHE_TIMEOUT_MS, 750, 10_000),
+    embeddingDimensions,
+    embeddingModel
   };
 }
 
@@ -301,6 +313,39 @@ export async function writeConversationCache(input: ConversationCacheWriteInput)
   });
 }
 
+export async function invalidateConversationCacheForUser(
+  userId: string,
+  config: SemanticCacheConfig = getSemanticCacheConfig()
+) {
+  if (!config.enabled || !config.redisUrl) {
+    return 0;
+  }
+
+  return withCacheTimeout(async () => {
+    const client = await getRedisClient(config);
+    let deleted = 0;
+    for await (const keys of client.scanIterator({
+      MATCH: `${escapeGlobPattern(config.prefix)}:item:*`,
+      COUNT: 200
+    })) {
+      const owners = await Promise.all(keys.map((key) => client.hGet(key, "userId")));
+      const matchingKeys: string[] = [];
+      for (let index = 0; index < keys.length; index += 1) {
+        if (owners[index] === userId) {
+          const key = keys[index];
+          if (key) {
+            matchingKeys.push(key);
+          }
+        }
+      }
+      if (matchingKeys.length > 0) {
+        deleted += await client.del(matchingKeys);
+      }
+    }
+    return deleted;
+  }, config, "user invalidation");
+}
+
 export async function closeSemanticCache() {
   const clientPromise = redisClientPromise;
   redisClientPromise = null;
@@ -337,15 +382,15 @@ async function readExactCache(context: LookupContext): Promise<ConversationCache
   }
 
   const client = await getRedisClient(context.config);
-  const itemKey = await client.get(
-    exactCacheKey(context.config, context.scope, context.contextFingerprint, context.normalizedQuery)
-  );
+  const exactKey = exactCacheKey(context.config, context.scope, context.contextFingerprint, context.normalizedQuery);
+  const itemKey = await client.get(exactKey);
   if (!itemKey) {
     return null;
   }
 
   const entry = await client.hGetAll(itemKey);
   if (!validEntry(entry, context.config.namespace, context.scope, context.contextFingerprint)) {
+    await client.del(exactKey);
     return null;
   }
   const metadata = cacheEntryMetadata({
@@ -367,7 +412,7 @@ async function readExactCache(context: LookupContext): Promise<ConversationCache
 }
 
 async function readSemanticCache(context: LookupContext): Promise<ConversationCacheHit | null> {
-  if (!context.embedding || context.embedding.length !== requiredEmbeddingDimensions) {
+  if (!context.embedding || context.embedding.length !== context.config.embeddingDimensions) {
     return null;
   }
 
@@ -537,6 +582,7 @@ async function writeCacheEntry(context: WriteContext): Promise<ConversationCache
     const itemKey = cacheItemKey(context.config, itemId);
     const exactKey = exactCacheKey(context.config, context.scope, context.contextFingerprint, context.normalizedQuery);
     await client.hSet(itemKey, {
+      userId: context.userId,
       scope: context.scope,
       contextFingerprint: context.contextFingerprint,
       namespace: context.config.namespace,
@@ -594,7 +640,7 @@ async function ensureVectorIndex(client: RedisClientType, config: SemanticCacheC
       "TYPE",
       "FLOAT32",
       "DIM",
-      String(requiredEmbeddingDimensions),
+      String(config.embeddingDimensions),
       "DISTANCE_METRIC",
       "COSINE"
     ]);
@@ -724,6 +770,15 @@ function nonNegativeInteger(value: number) {
 
 function escapeTagValue(value: string) {
   return value.replace(/([\\,.<>{}[\]"':;!@#$%^&*()\-=+~\s|])/g, "\\$1");
+}
+
+function escapeGlobPattern(value: string) {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("*", "\\*")
+    .replaceAll("?", "\\?")
+    .replaceAll("[", "\\[")
+    .replaceAll("]", "\\]");
 }
 
 function float32VectorBuffer(values: number[]) {

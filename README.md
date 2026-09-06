@@ -1,15 +1,16 @@
 # RaidenShinBoot
 
-RaidenShinBoot 是一个面向 Telegram 机器人的 TypeScript monorepo，核心人格为《原神》中的雷电真。项目使用 grammY 实现 bot，Hono 提供 typed API，PostgreSQL + Drizzle ORM + pgvector `halfvec(3072)` 提供长期记忆检索，并包含 React 19 + Refine v4 + Tailwind CSS v4 管理后台。
+RaidenShinBoot 是一个面向 Telegram 机器人的 TypeScript monorepo，核心人格为《原神》中的雷电真。项目使用 grammY 实现 bot，Hono 提供 typed API，PostgreSQL + Drizzle ORM + pgvector `halfvec(512)` 提供本地向量记忆检索，并包含 React 19 + Refine v4 + Tailwind CSS v4 管理后台。
 
 ## 技术栈
 
 - `pnpm` workspace，包含 `shared`、`database`、`boot`、`bot`、`server`、`panel`
 - grammY Telegram bot
 - Hono 链式路由，`AppType` 通过 `hono/client` 传给管理后台
-- PostgreSQL、Drizzle ORM、`pgvector` `halfvec(3072)`、HNSW 向量索引
+- PostgreSQL、Drizzle ORM、`pgvector` `halfvec(512)`、HNSW 向量索引
 - React 19、Refine v4、Tailwind CSS v4、Vite
-- Vercel AI SDK v6，兼容 OpenAI 风格 relay 的 chat、embedding、image 能力
+- Vercel AI SDK v6，兼容 OpenAI 风格 relay 的 chat、image 能力
+- 本地 BGE-small-zh-v1.5 CPU embedding sidecar，提供 OpenAI-compatible `/v1/embeddings`
 - `tsdown` 负责 package 构建，Vite 负责 panel 构建
 
 ## 快速启动
@@ -17,22 +18,22 @@ RaidenShinBoot 是一个面向 Telegram 机器人的 TypeScript monorepo，核�
 ```bash
 pnpm install
 cp .env.example .env
-docker compose up -d postgres
-docker compose up -d redis
-pnpm db:generate
+docker compose up -d postgres redis embedding
 pnpm db:migrate
+pnpm db:backfill-embeddings
 ADMIN_USERNAME=owner ADMIN_PASSWORD='replace-with-a-long-password' pnpm admin:bootstrap
 pnpm test:e2e
 pnpm dev:server
 pnpm dev:panel
 pnpm dev:bot
+pnpm dev:worker
 ```
 
-启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。如果 chat 与 embedding 使用不同服务，分别配置 `BOOT_CHAT_API_KEY` 和 `BOOT_EMBEDDING_API_KEY`。Telegram 隐藏命令 `/model` 可由已通过群组/会话准入的聊天用户切换全局对话模型，不需要额外管理员 env。
+启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。语言与图片任务走 relay；embedding 默认只访问本机 sidecar，不需要远程 key。`/model`、`/provider`、`/status` 只允许 `BOT_ADMIN_IDS` 中的 Telegram 用户使用。
 
-配置 `REDIS_URL` 后会启用 BullMQ 队列、Telegram webhook 入队、L1/L2 语义响应缓存。没有 Redis 时，本地 polling 仍可工作，长期记忆会回退到原来的 inline 创建路径；webhook 入队会在 `BOOT_QUEUE_ENQUEUE_TIMEOUT_MS` 后稳定返回 503。
+配置 `REDIS_URL` 后会启用 BullMQ 队列、Telegram webhook 入队、异步图片/提醒/记忆任务和 L1/L2 语义响应缓存。没有 Redis 时，本地 polling 对话仍可工作，长期记忆会回退到 inline 创建；图片和提醒命令会明确返回队列不可用，webhook 入队会稳定返回 503。
 
-webhook 模式需要设置 `BOOT_TELEGRAM_WEBHOOK_SECRET`，并在 Telegram 侧把 update 发到 `POST /api/telegram/webhook`，同时使用同一个值作为 `secret_token`。如需异步记忆增强，设置 `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`，并运行 `pnpm --filter @raiden/bot dev:worker`。
+webhook 模式需要设置 `BOOT_TELEGRAM_WEBHOOK_SECRET`，并在 Telegram 侧把 update 发到 `POST /api/telegram/webhook`，同时使用同一个值作为 `secret_token`。运行 `pnpm dev:worker` 消费 Telegram update、记忆、图片和提醒队列。
 
 可以设置 `BOT_RUNTIME_MODE=polling` 或 `BOT_RUNTIME_MODE=worker` 作为启动保护，避免把错误进程启动到错误部署槽位。
 
@@ -46,9 +47,9 @@ webhook 模式需要设置 `BOOT_TELEGRAM_WEBHOOK_SECRET`，并在 Telegram 侧�
 
 生产环境的 `BOOT_SETTINGS_ENCRYPTION_KEY` 必须长期稳定并备份。变更或丢失该值后，数据库中已经加密保存的 runtime secret 将无法解密，需要重新在 System 页保存对应 key。
 
-如果 chat relay 不提供 3072 维 embedding，需要设置 `BOOT_EMBEDDING_BASE_URL` 和 `BOOT_EMBEDDING_API_KEY` 指向兼容 provider。嵌入模型名固定为 `text-embedding-3-large`，必须返回 3072 维，否则长期记忆写入和检索会失败。
+本地 embedding 默认由 `services/embedding` 提供，模型为 `BAAI/bge-small-zh-v1.5`，输出归一化的 512 维向量。Compose 默认从 ModelScope 下载并持久化权重，也可通过 `EMBEDDING_MODEL_SOURCE=huggingface|modelscope|local` 更换获取方式。模型身份和 512 维数据库契约保持固定。
 
-设置 `BOOT_IMAGE_BASE_URL`、`BOOT_IMAGE_API_KEY` 后，可以启用 `/api/images`、Telegram `/draw` 和自然语言自主生图。生图模型固定为 `chatgpt-image-latest`，不对用户开放自定义。
+设置 `BOOT_IMAGE_BASE_URL`、`BOOT_IMAGE_API_KEY` 后，可以启用 `/api/images`、Telegram `/draw` 和自然语言生图。图片模型由 `config/models.yaml` 配置；当前允许列表只包含已经实测可用的 `gpt-image-2-codex`。只有同时出现在 YAML 允许列表和 relay `/v1/models` 目录中的图片模型才可切换。
 
 设置 `BOOT_SEARCH_PROVIDER` 和 `BOOT_SEARCH_API_KEY` 后，可以启用 Boot `web_search` tool、`POST /api/search`，以及聊天中由机器人自主判断的联网搜索。`BOOT_SEARCH_PROVIDER=disabled` 会禁用所有外部搜索渠道，包括 Wikipedia/Moegirl 直连。Telegram 不再开放 `/search` 命令。
 
@@ -66,12 +67,13 @@ macOS 没有 Docker Desktop 时，可以使用 `brew install colima docker docke
 | `PANEL_PORT` | `5173` | `panel:80` | `http://localhost:5173` 或你的 panel 域名 |
 | `POSTGRES_PORT` | `5432` | `postgres:5432` | 仅本机脚本需要用宿主机端口 |
 | `REDIS_PORT` | `6379` | `redis:6379` | 仅本机脚本需要用宿主机端口 |
+| `EMBEDDING_PORT` | `8080` | `embedding:8080` | 本机 Node 进程使用 `http://127.0.0.1:8080/v1` |
 
 修改 `SERVER_PORT` 或使用反向代理域名时，同步修改 `VITE_API_BASE_URL`；跨域访问时同步设置 `CORS_ALLOWED_ORIGINS`。
 
 ## Docker 部署
 
-填好 `.env` 后启动 API、panel、Postgres、Redis 和迁移任务：
+填好 `.env` 后启动 API、panel、Postgres、Redis、迁移和本地 embedding 回填任务：
 
 ```bash
 docker compose --profile app up --build
@@ -85,13 +87,13 @@ docker compose --profile app run --rm api pnpm admin:bootstrap
 
 运行前在 `.env` 中设置 `ADMIN_USERNAME` 和至少 12 位的 `ADMIN_PASSWORD`。
 
-`bot` 容器被放在独立 profile 中，方便没有 Telegram token 时只跑本地服务：
+`bot` 容器被放在独立 profile 中；该 profile 会同时启动 polling bot、队列 worker、本地 embedding、数据库、Redis 和迁移任务：
 
 ```bash
 docker compose --profile app --profile bot up --build
 ```
 
-webhook worker 使用 `bot-worker` 服务：
+只运行 webhook/队列 worker 时使用：
 
 ```bash
 docker compose --profile app --profile worker up --build
@@ -99,7 +101,13 @@ docker compose --profile app --profile worker up --build
 
 webhook 模式下，Hono API 只校验 Telegram secret token 并把原始 update 入队。worker 消费 BullMQ job，并运行和 long polling 相同的 grammY middleware 栈。
 
-`worker` profile 会启用异步记忆增强；本地 polling 默认 inline 创建记忆，除非显式设置 `BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true`。
+`BOOT_TELEGRAM_WORKER_CONCURRENCY` 默认是 `8`。同一聊天仍由 grammY 顺序处理，而 `/stop`、`/pause`、`/resume`、`/cancel` 使用独立控制锁，可以在长回复尚未结束时及时执行。不要把该值设为 `1`，否则 webhook worker 无法并发接收控制 update。
+
+`bot-worker` 同时消费 Telegram update、异步记忆、图片生成和提醒任务。`BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED=true` 时，对话主链路只负责入队，不等待远程记忆提炼。
+
+只有明显包含姓名、偏好、长期资料或“请记住”等稳定信息的消息才会进入记忆提炼，普通闲聊不会额外调用记忆模型。图片和提醒任务 ID 由 Telegram 消息身份稳定派生，update 重投不会重复创建昂贵任务。
+
+Compose 会在 API、polling bot 和 worker 启动前运行一次 `embedding-backfill`。旧的 3072 维记忆全部获得本地 512 维向量后，服务才会进入运行态，避免迁移窗口中旧记忆暂时不可检索。
 
 ## 验证
 
@@ -125,7 +133,7 @@ pnpm --filter @raiden/panel check
 - Telegram：`/draw 稻妻夜色里的樱花与柔和雷光`
 - Telegram 自然语言：例如“帮我画一张稻妻雨夜的真”，机器人会自主选择生图工具
 
-实际生图模型固定为 `chatgpt-image-latest`。机器人会先用当前对话模型生成更适合图片模型的提示词，再调用生图工具。
+Telegram 图片任务进入独立 BullMQ 队列，不阻塞同一聊天的文字回复。worker 会先用 `BOOT_TOOL_MODEL` 整理提示词，再调用 YAML 当前选择的图片模型；默认值是 `gpt-image-2-codex`。任务卡支持详情和取消，活动任务收到取消请求后不会发送生成结果。
 
 ## 联网搜索
 
@@ -151,14 +159,14 @@ boot 客户端支持按能力拆分 OpenAI-compatible provider：
 
 | 能力 | Base URL | API key | 模型 | 说明 |
 | --- | --- | --- | --- | --- |
-| Chat | `BOOT_CHAT_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` 或 `BOOT_API_KEY` | `BOOT_CHAT_MODEL` | 默认对话模型为 `gpt-5.5`；可在后台切换，Telegram 隐藏命令 `/model` 可由已通过准入的聊天用户切换。 |
-| Embedding | `BOOT_EMBEDDING_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_EMBEDDING_API_KEY` 或 `BOOT_API_KEY` | 固定 `text-embedding-3-large` | 必须返回 3072 维，因为长期记忆存储为 `halfvec(3072)`。 |
-| Image | `BOOT_IMAGE_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` 或 `BOOT_API_KEY` | 固定 `chatgpt-image-latest` | 用于 `POST /api/images`、Telegram `/draw` 和自然语言自主生图，返回 base64 图片。 |
+| Chat | `BOOT_CHAT_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_CHAT_API_KEY` 或 `BOOT_API_KEY` | `BOOT_CHAT_MODEL`、`BOOT_SUMMARY_MODEL`、`BOOT_MEMORY_MODEL`、`BOOT_TOOL_MODEL` | 四类语言任务默认均为普通 `gpt-5.5`，可分别选择 relay 目录中通过探针的模型。 |
+| Embedding | `BOOT_EMBEDDING_BASE_URL` | 通常不需要 | 固定 `BAAI/bge-small-zh-v1.5` | 本地 sidecar 返回归一化 512 维向量，数据库使用 `halfvec(512)`。 |
+| Image | `BOOT_IMAGE_BASE_URL` 或 `BOOT_BASE_URL` | `BOOT_IMAGE_API_KEY` 或 `BOOT_API_KEY` | `BOOT_IMAGE_MODEL` | 当前 YAML 允许列表只开放 `gpt-image-2-codex`，并要求 relay `/v1/models` 同时可见。 |
 | Web search | `BOOT_SEARCH_BASE_URL` 或 provider 默认地址 | `BOOT_SEARCH_API_KEY` | `BOOT_SEARCH_PROVIDER` | 支持 `tavily`、`brave`、`serper`，默认 `disabled`。 |
 
-管理后台 System 页可以把这些值保存到 PostgreSQL `runtime_settings`。runtime settings 优先于 `.env`，会记录 audit，并会被 Hono API 和 grammY bot 在下一次请求中读取。secret 字段为 write-only；设置 `BOOT_SETTINGS_ENCRYPTION_KEY` 后会使用 AES-256-GCM 加密存储。嵌入模型和生图模型在运行时强制固定，后台只展示只读状态。
+管理后台 System 页可以把这些值保存到 PostgreSQL `runtime_settings`。runtime settings 优先于 `.env`，会记录 audit，并会被 Hono API 和 grammY bot 在下一次请求中读取。secret 字段为 write-only；设置 `BOOT_SETTINGS_ENCRYPTION_KEY` 后会使用 AES-256-GCM 加密存储。System 页会显示 relay 的语言/图片模型目录、缓存状态和刷新时间；本地 embedding 模型与维度只读。
 
-使用 `new-api` 时，在 System 页选择 `new-api` preset，并把 `BOOT_BASE_URL` 指向 gateway 的 OpenAI-compatible `/v1` endpoint，例如 `https://new-api.example.com/v1`。对话模型列表来自 provider `/models`；后台保存 `BOOT_CHAT_MODEL` 或 Telegram 隐藏命令 `/model <model_id>` 切换时，都会先校验模型存在并做一次轻量 chat probe，成功后才写入运行时配置和审计日志。
+使用 `new-api` 时，在 System 页选择 `new-api` preset，并把 `BOOT_BASE_URL` 指向 gateway 的 OpenAI-compatible `/v1` endpoint，例如 `https://new-api.example.com/v1`。模型列表来自 provider `/models`；保存语言模型前会校验目录并执行轻量 chat probe，图片模型会校验图片能力，成功后才写入运行时配置和审计日志。
 
 已验证的分离配置：
 
@@ -167,11 +175,14 @@ BOOT_BASE_URL=https://api.example.com/v1
 BOOT_CHAT_MODEL=gpt-5.5
 BOOT_CHAT_API_KEY=
 
-BOOT_EMBEDDING_BASE_URL=https://embedding.example.com/v1
-BOOT_EMBEDDING_API_KEY=
+BOOT_SUMMARY_MODEL=gpt-5.5
+BOOT_MEMORY_MODEL=gpt-5.5
+BOOT_TOOL_MODEL=gpt-5.5
+BOOT_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
 
 BOOT_IMAGE_BASE_URL=https://image.example.com/v1
 BOOT_IMAGE_API_KEY=
+BOOT_IMAGE_MODEL=gpt-image-2-codex
 
 BOOT_SEARCH_PROVIDER=disabled
 BOOT_SEARCH_API_KEY=
@@ -186,38 +197,51 @@ BOOT_SEARCH_TIMEOUT_MS=15000
 BOOT_SETTINGS_ENCRYPTION_KEY=
 ```
 
-如果一个 relay key 能访问全部能力，只设置 `BOOT_API_KEY` 即可，能力级 key 可以留空。
+如果一个 relay key 能访问语言和图片能力，只设置 `BOOT_API_KEY` 即可，能力级 key 可以留空。本地 embedding 不使用这个 key。
 
 已验证的单 relay 配置：
 
 ```env
 BOOT_BASE_URL=https://api.example.com/v1
 BOOT_CHAT_BASE_URL=
-BOOT_EMBEDDING_BASE_URL=
+BOOT_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
 BOOT_API_KEY=
 BOOT_CHAT_MODEL=gpt-5.5
+BOOT_IMAGE_MODEL=gpt-image-2-codex
 BOOT_SEARCH_PROVIDER=disabled
 BOOT_WIKIPEDIA_API_URL=https://zh.wikipedia.org/w/api.php
 BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
 ```
 
-如果 embedding endpoint 不返回 3072 维，pgvector 写入和长期记忆检索会失败；此时应更换 embedding base URL/key，而不是更换模型名。
+如果 embedding endpoint 不返回 512 维，程序会在写入数据库前拒绝结果。更换 embedding 后端时必须保持模型、归一化、查询前缀与 512 维契约一致，并重新回填现有记忆。
 
 ## Telegram 命令设计
 
-公开命令保持精简：
+主要用户命令：
 
-- `/start`：显示欢迎信息；不是开始聊天的前置条件
-- `/help`：显示帮助
-- `/draw <描述>`：强制直接生图
+- `/start`、`/menu`、`/help`：欢迎、功能菜单与说明
+- `/draw <描述>`：创建异步图片任务
+- `/memory`、`/privacy`、`/clear`：查看记忆、调整隐私、清理当前会话
+- `/remind`、`/timers`、`/cancel`：创建、查看和取消提醒或图片任务
+- `/stop`、`/resume`：中止当前生成并恢复新请求
+- `/summary`、`/replymode`、`/quiet`、`/pause`：群聊摘要与群管理员控制
 
-隐藏但可用命令：
+Bot 管理员命令：
 
-- `/model`：查看当前对话模型
-- `/model list`：查看 provider `/models` 返回的可用模型
-- `/model <model_id>`：切换全局对话模型；已通过群组/会话准入的聊天用户可使用，会写入审计日志。该命令不会注册到 Telegram 命令菜单，也不会被后台命令权限规则管理。
+- `/model`：查看或切换全局语言/图片模型
+- `/provider`：刷新并查看 provider 模型目录状态
+- `/status`：查看脱敏后的运行状态
 
-不再公开 `/memory`、`/recall`、`/search`、`/status`。长期记忆浏览、语义召回、运行状态、模型和工具配置都在 Web 管理后台处理。普通聊天不需要 `/start`；机器人会在对话中自主决定是否调用搜索或绘图工具。
+群聊先经过本地互动策略：直接回复、明确 @ 和唤醒词会触发；`social` 模式可低频主动回复或 reaction；`mention_only` 和 `quiet` 抑制普通消息。普通聊天不需要先执行 `/start`。
+
+## 当前运行边界
+
+- `/summary` 只总结 Bot 已保存的当前 chat/thread 交互，无法覆盖被忽略或 Telegram 未投递的全部群消息。
+- BullMQ 任务采用 at-least-once 执行；进程在 Telegram 发送成功后、job 完成前退出时，图片或提醒有小概率重复发送。
+- `/pause` 状态和群互动冷却保存在进程内，重启后清空。
+- 图片任务限制为每个用户一个活动任务，配额由 Redis 原子去重实现；完成、最终失败或取消后释放。
+- `/timers` 分页扫描队列并最多展示最早的 100 条，更多结果会在回复中标明。
+- Persona 当前由文件维护并热加载；管理后台编辑、版本发布和回滚仍在后续路线中。
 
 Docker 宿主机覆盖项：
 
@@ -263,4 +287,4 @@ DocCopilot 专属技能没有复制。本项目的替代技能位于 `skills/rai
 
 ## 人格说明
 
-雷电真被建模为温柔、敏锐、有人情味，并珍视流逝瞬间之美的角色。prompt 有意避开雷电影偏严肃的永恒观，更贴近真所理解的永恒：记忆、关怀，以及每一个当下的价值。
+雷电真被建模为温柔、敏锐、有人情味，并珍视流逝瞬间之美的角色。人格源文件位于 `personas/raiden-makoto.persona`，采用英文声明式 DSL；运行时校验大写 token 的格式并确定性编译为中文 prompt，内置 token 有自然中文释义，新 token 会按下划线拆成可读英文，因此维护者增加性格、意象或关系时无需修改 TypeScript。每个 conversation 记录人格版本与 SHA-256；文件修改可热加载，解析失败时继续使用上一个有效版本。

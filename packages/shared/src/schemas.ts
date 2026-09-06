@@ -5,6 +5,8 @@ export const adminStatusSchema = z.enum(["active", "disabled"]);
 export const telegramChatTypeSchema = z.enum(["private", "group", "supergroup", "channel"]);
 export const telegramChatStatusSchema = z.enum(["pending", "approved", "blocked", "muted"]);
 export const telegramChatPolicySchema = z.enum(["allow_all_commands", "commands_only", "read_only", "disabled"]);
+export const telegramReplyModeSchema = z.enum(["mention_only", "social", "quiet"]);
+export const telegramPrivacyModeSchema = z.enum(["normal", "isolated", "off"]);
 export const bootGatewayPresetSchema = z.enum(["openai_compatible", "new_api"]);
 export const bootSearchProviderSchema = z.enum(["disabled", "tavily", "brave", "serper"]);
 export const bootSearchDepthSchema = z.enum(["basic", "advanced"]);
@@ -101,6 +103,7 @@ export const telegramUserSchema = z.object({
   firstName: z.string().nullable(),
   lastName: z.string().nullable(),
   languageCode: z.string().nullable(),
+  privacyMode: telegramPrivacyModeSchema,
   firstSeenAt: z.string(),
   updatedAt: z.string()
 });
@@ -112,6 +115,7 @@ export const telegramChatSchema = z.object({
   username: z.string().nullable(),
   status: telegramChatStatusSchema,
   policy: telegramChatPolicySchema,
+  replyMode: telegramReplyModeSchema,
   firstSeenAt: z.string(),
   updatedAt: z.string()
 });
@@ -120,7 +124,8 @@ export const updateTelegramChatRequestSchema = z.object({
   title: z.string().trim().max(160).nullable().optional(),
   username: z.string().trim().max(120).nullable().optional(),
   status: telegramChatStatusSchema.optional(),
-  policy: telegramChatPolicySchema.optional()
+  policy: telegramChatPolicySchema.optional(),
+  replyMode: telegramReplyModeSchema.optional()
 });
 
 export const telegramCommandNameSchema = z
@@ -150,6 +155,7 @@ export const messageSchema = z.object({
   id: z.string(),
   telegramUserId: z.string(),
   telegramChatId: z.string().nullable().optional(),
+  telegramThreadId: z.string().nullable().optional(),
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
   createdAt: z.string()
@@ -160,9 +166,23 @@ export const memorySchema = z.object({
   telegramUserId: z.string(),
   summary: z.string(),
   importance: z.number(),
+  scope: z.enum(["persona_global", "chat_shared", "user_private", "user_in_chat"]),
+  kind: z.enum(["fact", "event", "preference"]),
+  sourceChatId: z.string().nullable(),
+  sourceThreadId: z.string().nullable(),
+  subjectUserId: z.string().nullable(),
+  confidence: z.number().int().min(0).max(100),
+  embeddingModel: z.string().nullable(),
+  embeddingRevision: z.string().nullable(),
+  embeddingDimensions: z.number().int().nullable(),
+  embeddingNormalized: z.boolean(),
+  embeddingStatus: z.enum(["pending", "ready", "failed"]),
+  contentHash: z.string().nullable(),
+  embeddedAt: z.string().nullable(),
   sourceMessageId: z.string().nullable(),
   createdAt: z.string(),
-  lastAccessedAt: z.string().nullable()
+  lastAccessedAt: z.string().nullable(),
+  deletedAt: z.string().nullable()
 });
 
 export const chatRequestSchema = z.object({
@@ -172,8 +192,8 @@ export const chatRequestSchema = z.object({
 });
 
 export const generatedImageSchema = z.object({
-  base64: z.string().min(1),
-  mediaType: z.string().min(1)
+  base64: z.string().min(1).max(16_000_000),
+  mediaType: z.enum(["image/png", "image/jpeg", "image/webp"])
 });
 
 export const bootToolActionSchema = z.enum(["none", "web_search", "makoto_image"]);
@@ -221,22 +241,25 @@ export const imageGenerationResponseSchema = z.object({
 
 export const providerModelSchema = z
   .object({
-    id: z.string().min(1),
-    object: z.string().optional(),
-    owned_by: z.string().optional(),
+    id: z.string().min(1).max(200),
+    object: z.string().max(100).optional(),
+    owned_by: z.string().max(200).optional(),
     created: z.number().optional()
   })
   .passthrough();
 
 export const providerModelListResponseSchema = z.object({
   object: z.string().optional(),
-  data: z.array(providerModelSchema)
+  data: z.array(providerModelSchema).max(10_000)
 });
 
 export const chatModelListResponseSchema = z.object({
   currentModel: z.string(),
   models: z.array(providerModelSchema),
-  source: z.string().url()
+  source: z.string().url(),
+  capability: z.enum(["chat", "image"]),
+  fetchedAt: z.string().datetime(),
+  cacheStatus: z.enum(["live", "fresh_cache", "stale_cache"])
 });
 
 export const webSearchRequestSchema = z.object({
@@ -323,6 +346,9 @@ export const systemStatusSchema = z.object({
   bootWikipediaApiUrl: z.string(),
   bootMoegirlApiUrl: z.string(),
   bootChatModel: z.string(),
+  bootSummaryModel: z.string(),
+  bootMemoryModel: z.string(),
+  bootToolModel: z.string(),
   bootEmbeddingModel: z.string(),
   bootImageModel: z.string(),
   bootSearchProvider: z.string(),
@@ -336,7 +362,10 @@ export const systemStatusSchema = z.object({
   runtimeSettingsConfigured: z.boolean(),
   runtimeSettingsSecretStorageReady: z.boolean(),
   authEnabled: z.boolean(),
-  botTokenConfigured: z.boolean()
+  botTokenConfigured: z.boolean(),
+  personaId: z.string(),
+  personaVersion: z.number().int(),
+  personaHash: z.string()
 });
 
 export const runtimeSettingsSchema = z.object({
@@ -349,12 +378,18 @@ export const runtimeSettingsSchema = z.object({
   bootWikipediaApiUrl: z.string().url(),
   bootMoegirlApiUrl: z.string().url(),
   bootChatModel: z.string(),
+  bootSummaryModel: z.string(),
+  bootMemoryModel: z.string(),
+  bootToolModel: z.string(),
   bootEmbeddingModel: z.string(),
   bootImageModel: z.string(),
   bootSearchProvider: bootSearchProviderSchema,
   bootSearchMaxResults: z.number().int().min(1).max(10),
   bootSearchDepth: bootSearchDepthSchema,
-  embeddingDimensions: z.literal(3072),
+  embeddingDimensions: z.literal(512),
+  personaId: z.string(),
+  personaVersion: z.number().int(),
+  personaHash: z.string(),
   newApiCompatible: z.boolean(),
   secretStorageReady: z.boolean(),
   secrets: z.object({
@@ -377,8 +412,11 @@ export const updateRuntimeSettingsRequestSchema = z.object({
   bootWikipediaApiUrl: z.string().trim().url().optional(),
   bootMoegirlApiUrl: z.string().trim().url().optional(),
   bootChatModel: z.string().trim().min(1).max(200).optional(),
+  bootSummaryModel: z.string().trim().min(1).max(200).optional(),
+  bootMemoryModel: z.string().trim().min(1).max(200).optional(),
+  bootToolModel: z.string().trim().min(1).max(200).optional(),
   bootEmbeddingModel: z.never().optional(),
-  bootImageModel: z.never().optional(),
+  bootImageModel: z.string().trim().min(1).max(200).optional(),
   bootSearchProvider: bootSearchProviderSchema.optional(),
   bootSearchMaxResults: z.number().int().min(1).max(10).optional(),
   bootSearchDepth: bootSearchDepthSchema.optional(),
@@ -394,6 +432,8 @@ export type AdminStatus = z.infer<typeof adminStatusSchema>;
 export type TelegramChatType = z.infer<typeof telegramChatTypeSchema>;
 export type TelegramChatStatus = z.infer<typeof telegramChatStatusSchema>;
 export type TelegramChatPolicy = z.infer<typeof telegramChatPolicySchema>;
+export type TelegramReplyMode = z.infer<typeof telegramReplyModeSchema>;
+export type TelegramPrivacyMode = z.infer<typeof telegramPrivacyModeSchema>;
 export type BootGatewayPreset = z.infer<typeof bootGatewayPresetSchema>;
 export type BootSearchProviderName = z.infer<typeof bootSearchProviderSchema>;
 export type BootSearchDepth = z.infer<typeof bootSearchDepthSchema>;

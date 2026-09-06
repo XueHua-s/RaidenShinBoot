@@ -12,7 +12,7 @@ RaidenShinBoot 不把搜索、生图等能力直接散落在 Telegram handler �
 ## 当前工具
 
 - `web_search`：根据 query 意图在 Google-style provider、Wikipedia、Moegirl 之间路由，返回统一搜索结果。
-- `makoto_image`：通过固定生图模型生成图片。主对话链路会先用当前聊天模型改写图片提示词；改写失败时降级使用用户原始描述。
+- `makoto_image`：通过 YAML 当前选择的图片模型生成图片。主对话链路会先用工具推理模型改写图片提示词；改写失败时降级使用用户原始描述。
 
 搜索 provider 支持：
 
@@ -24,11 +24,11 @@ RaidenShinBoot 不把搜索、生图等能力直接散落在 Telegram handler �
 
 ## 模型策略
 
-- 对话模型：`BOOT_CHAT_MODEL`，可通过管理后台或 Telegram `/model <model_id>` 切换。
-- 嵌入模型：固定 `text-embedding-3-large`，用于长期记忆，必须返回 3072 维。
-- 生图模型：固定 `chatgpt-image-latest`，不允许用户或后台改模型名。
+- 语言模型：对话、总结、记忆提炼和工具推理可分别配置，YAML 默认均为普通 `gpt-5.5`。
+- 嵌入模型：本地 `BAAI/bge-small-zh-v1.5`，用于长期记忆和语义缓存，固定返回归一化 512 维向量。
+- 生图模型：从 provider `/v1/models` 的图片候选中选择，YAML 默认 `gpt-image-2-codex`。
 
-`/model <model_id>` 会先读取 provider `/models`、过滤明显非聊天模型，再做一次轻量 chat probe。探测成功后才写入 runtime setting 和审计日志。
+管理后台或 Bot 管理员执行模型切换时，会先读取 provider `/models` 并检查能力。语言模型还要通过轻量 chat probe，成功后才写入 runtime setting 和审计日志。
 
 ## 入口
 
@@ -40,7 +40,7 @@ RaidenShinBoot 不把搜索、生图等能力直接散落在 Telegram handler �
 - Telegram 自然语言：bot 自主判断是否调用搜索或生图
 - 管理后台：Conversations 页提供聊天测试台和搜索诊断；System 页管理 provider、base URL、key 和模型状态
 
-Telegram 不公开 `/search`、`/memory`、`/recall`、`/status`。普通聊天不需要 `/start`；`/start` 只显示欢迎信息。
+Telegram 不公开 `/search` 和 `/recall`；`/memory` 只在私聊展示，`/status` 只允许 `BOT_ADMIN_IDS` 中的管理员使用。普通聊天不需要 `/start`。
 
 ## 失败策略
 

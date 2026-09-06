@@ -1,33 +1,50 @@
 import {
   applyRuntimeSettingsChangesWithAudit,
+  clearConversationMessages,
   createAuditLog,
   createMemory,
   findConversationTurnByTelegramMessage,
   getRecentMessages,
+  getTelegramUser,
   getRuntimeSettingsEnvOverrides,
   listMemories,
   saveConversationTurn,
   searchMemories,
+  softDeleteMemories,
   type NewRuntimeSetting,
+  type ConversationScopeInput,
+  updateTelegramUserPrivacyMode,
   upsertTelegramUser
 } from "@raiden/database";
-import { isMemoryRecallRequest, type BootToolDecision, type BootToolStatus, type GeneratedImage } from "@raiden/shared";
 import {
-  embedText,
+  isMemoryMutationRequest,
+  isMemoryRecallRequest,
+  type BootToolDecision,
+  type BootToolStatus,
+  type GeneratedImage
+} from "@raiden/shared";
+import {
+  embedDocument,
+  embedQuery,
   generateMakotoImage,
   generateMakotoImagePrompt,
   generateMakotoReply,
   getBootConfig,
   isLikelyChatModelId,
+  isLikelyImageModelId,
   listChatModels,
+  listImageModels,
   planMakotoToolUse,
   probeChatModel,
+  shouldUseExplicitMakotoImageForMessage,
+  summarizeConversation,
   summarizeForMemory
 } from "@raiden/shared/boot";
 import { getBootSearchConfig } from "@raiden/shared/search";
 import {
   executeBootTool,
   formatBootToolError,
+  shouldUseBootSearchForMessage,
   type BootToolContext,
   type BootToolAuditEvent,
   type BootToolInput,
@@ -40,6 +57,7 @@ import {
   buildConversationCacheContextFingerprint,
   conversationCacheScope,
   getSemanticCacheConfig,
+  invalidateConversationCacheForUser,
   isStandaloneCacheCandidate,
   lookupConversationCache,
   writeConversationCache,
@@ -65,13 +83,19 @@ export type BootUserIdentity = {
 export type BootConversationInput = BootUserIdentity & {
   content: string;
   sourceChatId?: string | null;
+  sourceChatType?: "private" | "group" | "supergroup" | "channel" | null;
+  sourceThreadId?: string | null;
   sourceMessageId?: number | null;
+  abortSignal?: AbortSignal;
   toolPermission?: BootToolPermissionContext;
   toolAudit?: BootToolAuditHandler;
 };
 
 type DurableMemoryInput = {
   userId: string;
+  sourceChatId: string | null;
+  sourceThreadId: string | null;
+  sharedConversation: boolean;
   displayName: string | null;
   content: string;
   reply: string;
@@ -104,6 +128,37 @@ function storageUserId(identity: BootUserIdentity) {
   return `${identity.protocol}:${identity.userId}`;
 }
 
+export function resolveBootConversationScope(
+  input: BootUserIdentity & {
+    sourceChatId?: string | null;
+    sourceChatType?: "private" | "group" | "supergroup" | "channel" | null;
+    sourceThreadId?: string | null;
+  },
+  persona?: { id: string; version: number; hash: string }
+): ConversationScopeInput & { shared: boolean } {
+  const userId = storageUserId(input);
+  const chatId = input.sourceChatId?.trim() || null;
+  const threadId = input.sourceThreadId?.trim() || null;
+  const shared = input.sourceChatType === "group" || input.sourceChatType === "supergroup";
+  const scopeKey = [
+    input.protocol,
+    chatId ? `chat:${chatId}` : "direct",
+    threadId ? `thread:${threadId}` : "main",
+    shared ? "shared" : `user:${userId}`
+  ].join(":");
+  return {
+    protocol: input.protocol,
+    scopeKey,
+    telegramUserId: shared ? null : userId,
+    chatId,
+    threadId,
+    personaId: persona?.id ?? null,
+    personaVersion: persona?.version ?? null,
+    personaHash: persona?.hash ?? null,
+    shared
+  };
+}
+
 function envFlag(value: string | undefined, fallback: boolean) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) {
@@ -111,6 +166,81 @@ function envFlag(value: string | undefined, fallback: boolean) {
   }
 
   return !["0", "false", "no", "off", "disabled"].includes(normalized);
+}
+
+function privateMemoryScopeFilter(
+  privacyMode: "normal" | "isolated" | "off",
+  sourceChatId: string | null | undefined,
+  sourceThreadId: string | null | undefined
+) {
+  return privacyMode === "isolated"
+    ? {
+        privateSourceChatId: sourceChatId ?? null,
+        privateSourceThreadId: sourceThreadId ?? null
+      }
+    : {};
+}
+
+function cacheMemoryScopeFilter(
+  privacyMode: "normal" | "isolated" | "off",
+  sourceChatId: string | null | undefined,
+  sourceThreadId: string | null | undefined
+) {
+  return privacyMode === "isolated"
+    ? {
+        sourceChatId: sourceChatId ?? null,
+        sourceThreadId: sourceThreadId ?? null
+      }
+    : {};
+}
+
+function deterministicConversationToolDecision(content: string): BootToolDecision | null {
+  if (shouldUseExplicitMakotoImageForMessage(content)) {
+    return {
+      action: "makoto_image",
+      reason: "用户明确要求生成图片。",
+      query: null,
+      prompt: content.slice(0, 2000)
+    };
+  }
+
+  if (
+    /(联网|搜索|搜一下|查一下|帮我查|查找|资料来源|来源|链接|最新|新闻|事实核验|核实|天气|气温|空气质量|汇率|股价|航班|比分|油价|google|谷歌|web\s*search|search\s+the\s+web|look\s+up)/i.test(
+      content
+    )
+  ) {
+    return {
+      action: "web_search",
+      reason: "用户明确要求查询外部资料。",
+      query: content.slice(0, 500),
+      prompt: null
+    };
+  }
+
+  return null;
+}
+
+function mayNeedRemoteToolPlanning(content: string) {
+  return (
+    shouldUseBootSearchForMessage(content) ||
+    /(图片|图像|画面|插画|海报|头像|壁纸|视觉|image|illustration|poster|avatar|wallpaper|visual)/i.test(content)
+  );
+}
+
+function planConversationToolUse(input: Parameters<typeof planMakotoToolUse>[0]) {
+  const deterministic = deterministicConversationToolDecision(input.content);
+  if (deterministic) {
+    return Promise.resolve(deterministic);
+  }
+  if (!mayNeedRemoteToolPlanning(input.content)) {
+    return Promise.resolve({
+      action: "none",
+      reason: "消息没有外部工具意图。",
+      query: null,
+      prompt: null
+    } satisfies BootToolDecision);
+  }
+  return planMakotoToolUse(input);
 }
 
 function defaultToolPermission(input: BootConversationInput): BootToolPermissionContext {
@@ -263,8 +393,12 @@ export async function executeEffectiveBootTool<Name extends BootToolName>(
   return executeBootTool(name, input, await getEffectiveBootToolContext(name, options));
 }
 
-export async function listEffectiveChatModels() {
-  return listChatModels(await getEffectiveBootConfig());
+export async function listEffectiveChatModels(forceRefresh = false) {
+  return listChatModels(await getEffectiveBootConfig(), forceRefresh);
+}
+
+export async function listEffectiveImageModels(forceRefresh = false) {
+  return listImageModels(await getEffectiveBootConfig(), forceRefresh);
 }
 
 export async function switchEffectiveChatModel(input: {
@@ -279,7 +413,7 @@ export async function switchEffectiveChatModel(input: {
   }
 
   const beforeConfig = await getEffectiveBootConfig();
-  if (!isLikelyChatModelId(modelId)) {
+  if (!isLikelyChatModelId(modelId, beforeConfig)) {
     throw new Error(`Model "${modelId}" does not look like a chat model.`);
   }
 
@@ -327,6 +461,59 @@ export async function switchEffectiveChatModel(input: {
   };
 }
 
+export async function switchEffectiveImageModel(input: {
+  modelId: string;
+  actorTelegramId?: string | null;
+  actorUsername?: string | null;
+  chatId?: string | null;
+}) {
+  const modelId = input.modelId.trim();
+  if (!modelId) {
+    throw new Error("Model id is required.");
+  }
+
+  const beforeConfig = await getEffectiveBootConfig();
+  if (!isLikelyImageModelId(modelId, beforeConfig)) {
+    throw new Error(`Model "${modelId}" does not look like an image model.`);
+  }
+  const modelList = await listImageModels(beforeConfig);
+  if (!modelList.models.some((model) => model.id === modelId)) {
+    throw new Error(`Model "${modelId}" was not found in the provider image model list.`);
+  }
+
+  await applyRuntimeSettingsChangesWithAudit({
+    changes: {
+      upserts: [
+        {
+          key: "BOOT_IMAGE_MODEL",
+          value: modelId,
+          encrypted: false,
+          updatedByAdminId: null
+        }
+      ]
+    },
+    audit: {
+      actorAdminId: null,
+      action: "runtime_settings.telegram_image_model_update",
+      targetType: "runtime_settings",
+      targetId: "BOOT_IMAGE_MODEL",
+      before: { bootImageModel: beforeConfig.BOOT_IMAGE_MODEL },
+      after: {
+        bootImageModel: modelId,
+        actorTelegramId: input.actorTelegramId ?? null,
+        actorUsername: input.actorUsername ?? null,
+        chatId: input.chatId ?? null
+      }
+    }
+  });
+
+  return {
+    beforeModel: beforeConfig.BOOT_IMAGE_MODEL,
+    afterModel: modelId,
+    availableModelCount: modelList.models.length
+  };
+}
+
 export async function rememberBootUser(identity: BootUserIdentity) {
   return upsertTelegramUser({
     telegramId: storageUserId(identity),
@@ -369,9 +556,17 @@ export async function runBootConversation(input: BootConversationInput) {
   const semanticCacheConfig = getSemanticCacheConfig(runtimeEnv);
   const queueConfig = getBootQueueConfig(runtimeEnv);
   const userId = storageUserId(input);
-  const cacheScope = conversationCacheScope({ protocol: input.protocol, userId: input.userId });
+  const scope = resolveBootConversationScope(input, {
+    id: bootConfig.PERSONA_ID,
+    version: bootConfig.PERSONA_VERSION,
+    hash: bootConfig.PERSONA_HASH
+  });
+  const cacheScope = conversationCacheScope({ scopeKey: scope.scopeKey });
 
-  await rememberBootUser(input);
+  const rememberedUser = await rememberBootUser(input);
+  const privacyMode = rememberedUser?.privacyMode ?? "normal";
+  const memoryEnabled = privacyMode !== "off";
+  const canAttemptExactCache = privacyMode !== "off" && !scope.shared && isStandaloneCacheCandidate(input.content);
   if (input.sourceMessageId !== null && input.sourceMessageId !== undefined) {
     const existingTurn = await findConversationTurnByTelegramMessage({
       telegramUserId: userId,
@@ -384,8 +579,15 @@ export async function runBootConversation(input: BootConversationInput) {
   }
 
   const [recentMessages, cacheContextMemories] = await Promise.all([
-    getRecentMessages(userId, 12),
-    listMemories({ telegramUserId: userId, limit: 10, offset: 0 })
+    getRecentMessages(scope.scopeKey, 12),
+    memoryEnabled && canAttemptExactCache
+      ? listMemories({
+          telegramUserId: userId,
+          ...cacheMemoryScopeFilter(privacyMode, input.sourceChatId, input.sourceThreadId),
+          limit: 10,
+          offset: 0
+        })
+      : Promise.resolve([])
   ]);
   const cacheContextFingerprint = buildCacheContextFingerprint({
     identity: input,
@@ -400,7 +602,6 @@ export async function runBootConversation(input: BootConversationInput) {
     content: message.content
   }));
 
-  const canAttemptExactCache = isStandaloneCacheCandidate(input.content);
   let exactCacheStatus: Extract<ConversationCacheStatus, "disabled" | "miss"> = canAttemptExactCache ? "miss" : "disabled";
   if (canAttemptExactCache) {
     const exactCache = await lookupConversationCache({
@@ -417,21 +618,23 @@ export async function runBootConversation(input: BootConversationInput) {
         bootConfig,
         searchConfig,
         semanticCacheConfig,
-        cacheScope
+        cacheScope,
+        privacyMode
       });
     }
     exactCacheStatus = exactCache.status === "disabled" ? "disabled" : "miss";
   }
 
   const [toolDecision, queryEmbedding] = await Promise.all([
-    planMakotoToolUse({
+    planConversationToolUse({
       content: input.content,
       config: bootConfig,
-      history
+      history,
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {})
     }),
-    embedText(input.content, bootConfig)
+    embedQuery(input.content, bootConfig, input.abortSignal)
   ]);
-  const cacheEligible = toolDecision.action === "none";
+  const cacheEligible = privacyMode !== "off" && !scope.shared && toolDecision.action === "none";
   let cacheStatus: Extract<ConversationCacheStatus, "disabled" | "miss"> = cacheEligible ? exactCacheStatus : "disabled";
 
   if (cacheEligible && canAttemptExactCache && exactCacheStatus !== "disabled") {
@@ -451,22 +654,33 @@ export async function runBootConversation(input: BootConversationInput) {
         searchConfig,
         semanticCacheConfig,
         cacheScope,
+        privacyMode,
         embedding: queryEmbedding
       });
     }
     cacheStatus = semanticCache.status === "disabled" ? "disabled" : "miss";
   }
 
-  let memories = await searchMemories({
-    telegramUserId: userId,
-    embedding: queryEmbedding,
-    limit: 5,
-    maxDistance: 0.55
-  });
-  if (memories.length === 0 && isMemoryRecallRequest(input.content)) {
+  let memories = memoryEnabled
+    ? await searchMemories({
+        telegramUserId: userId,
+        embedding: queryEmbedding,
+        sourceChatId: input.sourceChatId ?? null,
+        sourceThreadId: input.sourceThreadId ?? null,
+        includePrivate: !scope.shared,
+        ...privateMemoryScopeFilter(privacyMode, input.sourceChatId, input.sourceThreadId),
+        limit: 5,
+        maxDistance: 0.55
+      })
+    : [];
+  if (memoryEnabled && memories.length === 0 && isMemoryRecallRequest(input.content)) {
     memories = await searchMemories({
       telegramUserId: userId,
       embedding: queryEmbedding,
+      sourceChatId: input.sourceChatId ?? null,
+      sourceThreadId: input.sourceThreadId ?? null,
+      includePrivate: !scope.shared,
+      ...privateMemoryScopeFilter(privacyMode, input.sourceChatId, input.sourceThreadId),
       limit: 5
     });
   }
@@ -480,7 +694,8 @@ export async function runBootConversation(input: BootConversationInput) {
     history,
     toolDecision,
     toolPermission: input.toolPermission ?? defaultToolPermission(input),
-    toolAudit: input.toolAudit ?? defaultBootToolAudit()
+    toolAudit: input.toolAudit ?? defaultBootToolAudit(),
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {})
   });
   const responseMetadata: ConversationCacheMetadata = {
     memoryCount: memories.length,
@@ -498,14 +713,20 @@ export async function runBootConversation(input: BootConversationInput) {
           webSearch: toolResult.webSearch.response,
           webSearchError: toolResult.webSearch.error,
           config: bootConfig,
+          maxCharacters: scope.shared ? 300 : 3500,
+          ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
           history
         });
+
+  input.abortSignal?.throwIfAborted();
 
   let savedTurn: Awaited<ReturnType<typeof saveConversationTurn>>;
   try {
     savedTurn = await saveConversationTurn({
+      scope,
       telegramUserId: userId,
       telegramChatId: input.sourceChatId ?? null,
+      telegramThreadId: input.sourceThreadId ?? null,
       telegramMessageId: input.sourceMessageId ?? null,
       userContent: input.content,
       assistantContent: reply
@@ -527,19 +748,25 @@ export async function runBootConversation(input: BootConversationInput) {
   }
   const { userMessage, assistantMessage } = savedTurn;
 
-  await scheduleDurableMemoryIfUseful({
-    userId,
-    displayName,
-    content: input.content,
-    reply,
-    sourceMessageId: userMessage.id,
-    bootConfig,
-    runtimeEnv,
-    queueConfig
-  });
+  if (memoryEnabled) {
+    await scheduleDurableMemoryIfUseful({
+      userId,
+      sourceChatId: input.sourceChatId ?? null,
+      sourceThreadId: input.sourceThreadId ?? null,
+      sharedConversation: scope.shared,
+      displayName,
+      content: input.content,
+      reply,
+      sourceMessageId: userMessage.id,
+      bootConfig,
+      runtimeEnv,
+      queueConfig
+    });
+  }
   if (cacheEligible) {
     refreshConversationCacheInBackground({
       identity: input,
+      scopeKey: scope.scopeKey,
       userId,
       bootConfig,
       searchConfig,
@@ -549,7 +776,8 @@ export async function runBootConversation(input: BootConversationInput) {
       reply,
       embedding: queryEmbedding,
       metadata: responseMetadata,
-      warning: "Semantic cache write failed."
+      warning: "Semantic cache write failed.",
+      privacyMode
     });
   }
 
@@ -580,6 +808,7 @@ async function executeConversationTool(input: {
   toolDecision: BootToolDecision;
   toolPermission: BootToolPermissionContext;
   toolAudit: BootToolAuditHandler;
+  abortSignal?: AbortSignal;
 }): Promise<{
   webSearch: ConversationWebSearchResult;
   toolStatus: BootToolStatus;
@@ -665,7 +894,8 @@ async function executeConversationTool(input: {
         userPrompt: originalPrompt,
         userName: input.displayName,
         history: input.history,
-        config: input.bootConfig
+        config: input.bootConfig,
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {})
       });
     } catch {
       promptRewriteFallback = true;
@@ -685,7 +915,8 @@ async function executeConversationTool(input: {
               prompt: toolInput.prompt,
               size: toolInput.size as `${number}x${number}`,
               n: toolInput.n,
-              config: input.bootConfig
+              config: input.bootConfig,
+              ...(input.abortSignal ? { abortSignal: input.abortSignal } : {})
             }),
           permission: input.toolPermission,
           audit: input.toolAudit
@@ -736,13 +967,21 @@ async function saveCachedReply(input: {
   searchConfig: ReturnType<typeof getBootSearchConfig>;
   semanticCacheConfig: ReturnType<typeof getSemanticCacheConfig>;
   cacheScope: string;
+  privacyMode: "normal" | "isolated" | "off";
   embedding?: number[] | undefined;
 }) {
+  const scope = resolveBootConversationScope(input.input, {
+    id: input.bootConfig.PERSONA_ID,
+    version: input.bootConfig.PERSONA_VERSION,
+    hash: input.bootConfig.PERSONA_HASH
+  });
   let savedTurn: Awaited<ReturnType<typeof saveConversationTurn>>;
   try {
     savedTurn = await saveConversationTurn({
+      scope,
       telegramUserId: input.userId,
       telegramChatId: input.input.sourceChatId ?? null,
+      telegramThreadId: input.input.sourceThreadId ?? null,
       telegramMessageId: input.input.sourceMessageId ?? null,
       userContent: input.input.content,
       assistantContent: input.hit.reply
@@ -766,11 +1005,13 @@ async function saveCachedReply(input: {
   if (input.hit.status === "l2_hit" || input.embedding) {
     refreshConversationCacheInBackground({
       identity: input.input,
+      scopeKey: scope.scopeKey,
       userId: input.userId,
       bootConfig: input.bootConfig,
       searchConfig: input.searchConfig,
       semanticCacheConfig: input.semanticCacheConfig,
       cacheScope: input.cacheScope,
+      privacyMode: input.privacyMode,
       content: input.input.content,
       reply: input.hit.reply,
       embedding: input.embedding,
@@ -813,6 +1054,8 @@ function buildCacheContextFingerprint(input: {
     userId: input.identity.userId,
     chatModel: input.bootConfig.BOOT_CHAT_MODEL,
     embeddingModel: input.bootConfig.BOOT_EMBEDDING_MODEL,
+    personaHash: input.bootConfig.PERSONA_HASH,
+    userDisplayName: input.identity.firstName ?? input.identity.username ?? null,
     searchProvider: input.searchConfig.BOOT_SEARCH_PROVIDER,
     history: input.history,
     memories: input.memories
@@ -820,7 +1063,8 @@ function buildCacheContextFingerprint(input: {
 }
 
 function refreshConversationCacheInBackground(input: {
-  identity: BootUserIdentity;
+  identity: BootConversationInput;
+  scopeKey: string;
   userId: string;
   bootConfig: ReturnType<typeof getBootConfig>;
   searchConfig: ReturnType<typeof getBootSearchConfig>;
@@ -831,13 +1075,19 @@ function refreshConversationCacheInBackground(input: {
   embedding?: number[] | undefined;
   metadata: ConversationCacheMetadata;
   warning: string;
+  privacyMode: "normal" | "isolated" | "off";
 }) {
   void (async () => {
     // Reload the post-save context so cache keys match database ordering and memory side effects.
     const [history, memories, embedding] = await Promise.all([
-      getRecentMessages(input.userId, 12),
-      listMemories({ telegramUserId: input.userId, limit: 10, offset: 0 }),
-      input.embedding ? Promise.resolve(input.embedding) : embedText(input.content, input.bootConfig)
+      getRecentMessages(input.scopeKey, 12),
+      listMemories({
+        telegramUserId: input.userId,
+        ...cacheMemoryScopeFilter(input.privacyMode, input.identity.sourceChatId, input.identity.sourceThreadId),
+        limit: 10,
+        offset: 0
+      }),
+      input.embedding ? Promise.resolve(input.embedding) : embedQuery(input.content, input.bootConfig)
     ]);
     const contextFingerprint = buildCacheContextFingerprint({
       identity: input.identity,
@@ -847,6 +1097,7 @@ function refreshConversationCacheInBackground(input: {
       memories
     });
     const result = await writeConversationCache({
+      userId: input.userId,
       scope: input.cacheScope,
       contextFingerprint,
       content: input.content,
@@ -871,8 +1122,19 @@ async function scheduleDurableMemoryIfUseful(
     queueConfig: ReturnType<typeof getBootQueueConfig>;
   }
 ) {
+  // Most turns are transient conversation. Only send likely durable facts to
+  // the remote extraction model; this keeps normal chat to one language-model
+  // call while preserving explicit names, preferences, goals, and requests to
+  // remember something.
+  if (!isMemoryMutationRequest(input.content)) {
+    return;
+  }
+
   const jobInput: MemoryEnrichmentJob = {
     userId: input.userId,
+    sourceChatId: input.sourceChatId,
+    sourceThreadId: input.sourceThreadId,
+    sharedConversation: input.sharedConversation,
     displayName: input.displayName,
     content: input.content,
     reply: input.reply,
@@ -921,37 +1183,145 @@ async function createDurableMemory(input: DurableMemoryInput) {
     return;
   }
 
-  const memoryEmbedding = await embedText(memorySummary, input.bootConfig);
+  const memoryEmbedding = await embedDocument(memorySummary, input.bootConfig);
   await createMemory({
     telegramUserId: input.userId,
     summary: memorySummary,
     embedding: memoryEmbedding,
+    embeddingModel: input.bootConfig.BOOT_EMBEDDING_MODEL,
     importance: 6,
+    scope: input.sharedConversation ? "user_in_chat" : "user_private",
+    kind: "fact",
+    sourceChatId: input.sourceChatId,
+    sourceThreadId: input.sourceThreadId,
+    subjectUserId: input.userId,
+    confidence: 70,
     sourceMessageId: input.sourceMessageId
   });
 }
 
 export async function processMemoryEnrichmentJob(input: MemoryEnrichmentJob) {
+  const user = await getTelegramUser(input.userId);
+  if (!user || user.privacyMode === "off") {
+    return;
+  }
   await createDurableMemory({
     ...input,
     bootConfig: await getEffectiveBootConfig()
   });
 }
 
-export async function recallBootMemories(input: BootUserIdentity & { query: string; limit?: number }) {
-  const embedding = await embedText(input.query, await getEffectiveBootConfig());
+export async function recallBootMemories(
+  input: BootUserIdentity & {
+    query: string;
+    limit?: number;
+    sourceChatId?: string | null;
+    sourceChatType?: "private" | "group" | "supergroup" | "channel" | null;
+    sourceThreadId?: string | null;
+  }
+) {
+  const scope = resolveBootConversationScope(input);
+  const privacyMode = await getBootPrivacyMode(input);
+  if (privacyMode === "off") {
+    return [];
+  }
+  const embedding = await embedQuery(input.query, await getEffectiveBootConfig());
   return searchMemories({
     telegramUserId: storageUserId(input),
     embedding,
+    sourceChatId: input.sourceChatId ?? null,
+    sourceThreadId: input.sourceThreadId ?? null,
+    includePrivate: !scope.shared,
+    ...privateMemoryScopeFilter(privacyMode, input.sourceChatId, input.sourceThreadId),
     limit: input.limit ?? 6
   });
 }
 
-export async function listBootMemories(input: BootUserIdentity & { limit?: number; offset?: number }) {
+export async function listBootMemories(
+  input: BootUserIdentity & {
+    limit?: number;
+    offset?: number;
+    sourceChatId?: string | null;
+    sourceThreadId?: string | null;
+  }
+) {
   return listMemories({
     telegramUserId: storageUserId(input),
+    sourceChatId: input.sourceChatId ?? null,
+    sourceThreadId: input.sourceThreadId ?? null,
     limit: input.limit ?? 8,
     offset: input.offset ?? 0
+  });
+}
+
+export async function forgetBootMemories(input: BootUserIdentity & { sourceChatId?: string | null }) {
+  const userId = storageUserId(input);
+  const deleted = await softDeleteMemories(
+    input.sourceChatId === undefined
+      ? { telegramUserId: userId }
+      : { telegramUserId: userId, sourceChatId: input.sourceChatId }
+  );
+  try {
+    await invalidateConversationCacheForUser(userId);
+  } catch (error) {
+    console.warn("Semantic cache invalidation failed after memory deletion.", error instanceof Error ? error.message : error);
+  }
+  return deleted;
+}
+
+export async function getBootPrivacyMode(identity: BootUserIdentity) {
+  const user = (await getTelegramUser(storageUserId(identity))) ?? (await rememberBootUser(identity));
+  return user?.privacyMode ?? "normal";
+}
+
+export async function setBootPrivacyMode(
+  identity: BootUserIdentity,
+  privacyMode: "normal" | "isolated" | "off"
+) {
+  await rememberBootUser(identity);
+  const user = await updateTelegramUserPrivacyMode(storageUserId(identity), privacyMode);
+  if (!user) {
+    throw new Error("Unable to update privacy mode.");
+  }
+  try {
+    await invalidateConversationCacheForUser(storageUserId(identity));
+  } catch (error) {
+    console.warn(
+      "Semantic cache invalidation failed after privacy mode change.",
+      error instanceof Error ? error.message : error
+    );
+  }
+  return user.privacyMode;
+}
+
+export async function clearBootConversation(
+  input: BootUserIdentity & {
+    sourceChatId?: string | null;
+    sourceChatType?: "private" | "group" | "supergroup" | "channel" | null;
+    sourceThreadId?: string | null;
+  }
+) {
+  const scope = resolveBootConversationScope(input);
+  return clearConversationMessages(scope.scopeKey);
+}
+
+export async function summarizeBootConversation(
+  input: BootUserIdentity & {
+    sourceChatId?: string | null;
+    sourceChatType?: "private" | "group" | "supergroup" | "channel" | null;
+    sourceThreadId?: string | null;
+    limit?: number;
+  }
+) {
+  const scope = resolveBootConversationScope(input);
+  const history = await getRecentMessages(scope.scopeKey, input.limit ?? 60);
+  return summarizeConversation({
+    history: history.map((message) => ({
+      role: message.role as "user" | "assistant" | "system",
+      content: message.content
+    })),
+    config: await getEffectiveBootConfig(),
+    maxCharacters: scope.shared ? 1200 : 1800
   });
 }
 

@@ -26,7 +26,7 @@ function canManageCommand(value: string) {
 }
 
 export function TelegramPage({ user }: { user: AdminUserDto }) {
-  const { t, formatStatus, formatPolicy, formatChatType, formatDate } = useI18n();
+  const { t, formatStatus, formatPolicy, formatReplyMode, formatChatType, formatDate } = useI18n();
   const { data, total, loading, error, reload } = useResourceList<TelegramChatDto>("telegram-chats", 50);
   const commandPermissions = useResourceList<TelegramCommandPermissionDto>("telegram-command-permissions", 100);
   const [mutationError, setMutationError] = useState<string | null>(null);
@@ -37,7 +37,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
   const [deletingPermissionId, setDeletingPermissionId] = useState<string | null>(null);
   const canModerate = canModerateTelegram(user);
 
-  async function updateChat(chatId: string, patch: Partial<Pick<TelegramChatDto, "status" | "policy">>) {
+  async function updateChat(chatId: string, patch: Partial<Pick<TelegramChatDto, "status" | "policy" | "replyMode">>) {
     if (!canModerate) {
       return;
     }
@@ -134,6 +134,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                 <Th>{t("telegram.type")}</Th>
                 <Th>{t("common.status")}</Th>
                 <Th>{t("telegram.policy")}</Th>
+                <Th>{t("telegram.replyMode")}</Th>
                 <Th>{t("common.updated")}</Th>
                 <Th className="text-right">{t("common.actions")}</Th>
               </tr>
@@ -164,6 +165,20 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                       <option value="disabled">{formatPolicy("disabled")}</option>
                     </select>
                   </Td>
+                  <Td>
+                    <select
+                      className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:opacity-70"
+                      disabled={!canModerate}
+                      value={chat.replyMode}
+                      onChange={(event) =>
+                        updateChat(chat.chatId, { replyMode: event.target.value as TelegramChatDto["replyMode"] })
+                      }
+                    >
+                      <option value="mention_only">{formatReplyMode("mention_only")}</option>
+                      <option value="social">{formatReplyMode("social")}</option>
+                      <option value="quiet">{formatReplyMode("quiet")}</option>
+                    </select>
+                  </Td>
                   <Td>{formatDate(chat.updatedAt)}</Td>
                   <Td>
                     <div className="flex justify-end gap-2">
@@ -190,7 +205,7 @@ export function TelegramPage({ user }: { user: AdminUserDto }) {
                   </Td>
                 </tr>
               ))}
-              {data.length === 0 && <EmptyRow colSpan={6}>{t("telegram.empty")}</EmptyRow>}
+              {data.length === 0 && <EmptyRow colSpan={7}>{t("telegram.empty")}</EmptyRow>}
             </tbody>
           </Table>
         </div>

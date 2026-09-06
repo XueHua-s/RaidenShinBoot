@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { getEffectiveBootConfig } from "@raiden/boot";
 import { countMemories, createMemory, listMemories, searchMemories } from "@raiden/database";
 import { createMemoryRequestSchema, memorySearchRequestSchema, paginationQuerySchema } from "@raiden/shared";
-import { embedText } from "@raiden/shared/boot";
+import { embedDocument, embedQuery } from "@raiden/shared/boot";
 import { Hono } from "hono";
 import { z } from "zod";
 import { requirePermission, type AuthVariables } from "../auth.js";
@@ -17,9 +17,23 @@ function memoryDto(memory: Awaited<ReturnType<typeof createMemory>>) {
     telegramUserId: memory.telegramUserId,
     summary: memory.summary,
     importance: memory.importance,
+    scope: memory.scope,
+    kind: memory.kind,
+    sourceChatId: memory.sourceChatId,
+    sourceThreadId: memory.sourceThreadId,
+    subjectUserId: memory.subjectUserId,
+    confidence: memory.confidence,
+    embeddingModel: memory.embeddingModel,
+    embeddingRevision: memory.embeddingRevision,
+    embeddingDimensions: memory.embeddingDimensions,
+    embeddingNormalized: memory.embeddingNormalized,
+    embeddingStatus: memory.embeddingStatus,
+    contentHash: memory.contentHash,
+    embeddedAt: memory.embeddedAt?.toISOString() ?? null,
     sourceMessageId: memory.sourceMessageId,
     createdAt: memory.createdAt.toISOString(),
-    lastAccessedAt: memory.lastAccessedAt?.toISOString() ?? null
+    lastAccessedAt: memory.lastAccessedAt?.toISOString() ?? null,
+    deletedAt: memory.deletedAt?.toISOString() ?? null
   };
 }
 
@@ -37,7 +51,7 @@ export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
   .post("/search", zValidator("json", memorySearchRequestSchema), async (c) => {
     requirePermission(c, "memory:read");
     const body = c.req.valid("json");
-    const embedding = await embedText(body.query, await getEffectiveBootConfig());
+    const embedding = await embedQuery(body.query, await getEffectiveBootConfig());
     const rows = await searchMemories({
       telegramUserId: body.telegramUserId,
       embedding,
@@ -56,12 +70,14 @@ export const memoriesRoute = new Hono<{ Variables: AuthVariables }>()
   .post("/", zValidator("json", createMemoryRequestSchema), async (c) => {
     requirePermission(c, "memory:write");
     const body = c.req.valid("json");
-    const embedding = await embedText(body.summary, await getEffectiveBootConfig());
+    const bootConfig = await getEffectiveBootConfig();
+    const embedding = await embedDocument(body.summary, bootConfig);
     const memory = await createMemory({
       telegramUserId: body.telegramUserId,
       summary: body.summary,
       importance: body.importance,
-      embedding
+      embedding,
+      embeddingModel: bootConfig.BOOT_EMBEDDING_MODEL
     });
 
     return c.json({ data: memoryDto(memory) }, 201);

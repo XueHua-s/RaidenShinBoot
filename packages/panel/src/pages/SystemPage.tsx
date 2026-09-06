@@ -21,6 +21,9 @@ type RuntimeSettingsForm = Pick<
   | "bootWikipediaApiUrl"
   | "bootMoegirlApiUrl"
   | "bootChatModel"
+  | "bootSummaryModel"
+  | "bootMemoryModel"
+  | "bootToolModel"
   | "bootEmbeddingModel"
   | "bootImageModel"
   | "bootSearchProvider"
@@ -65,6 +68,9 @@ function settingsToForm(settings: RuntimeSettings): RuntimeSettingsForm {
     bootWikipediaApiUrl: settings.bootWikipediaApiUrl,
     bootMoegirlApiUrl: settings.bootMoegirlApiUrl,
     bootChatModel: settings.bootChatModel,
+    bootSummaryModel: settings.bootSummaryModel,
+    bootMemoryModel: settings.bootMemoryModel,
+    bootToolModel: settings.bootToolModel,
     bootEmbeddingModel: settings.bootEmbeddingModel,
     bootImageModel: settings.bootImageModel,
     bootSearchProvider: settings.bootSearchProvider,
@@ -105,6 +111,10 @@ function buildRuntimeSettingsPatch(input: {
   assignIfChanged("bootWikipediaApiUrl", form.bootWikipediaApiUrl, settings.bootWikipediaApiUrl);
   assignIfChanged("bootMoegirlApiUrl", form.bootMoegirlApiUrl, settings.bootMoegirlApiUrl);
   assignIfChanged("bootChatModel", form.bootChatModel, settings.bootChatModel);
+  assignIfChanged("bootSummaryModel", form.bootSummaryModel, settings.bootSummaryModel);
+  assignIfChanged("bootMemoryModel", form.bootMemoryModel, settings.bootMemoryModel);
+  assignIfChanged("bootToolModel", form.bootToolModel, settings.bootToolModel);
+  assignIfChanged("bootImageModel", form.bootImageModel, settings.bootImageModel);
   assignIfChanged("bootSearchProvider", form.bootSearchProvider, settings.bootSearchProvider);
   assignIfChanged("bootSearchMaxResults", form.bootSearchMaxResults, settings.bootSearchMaxResults);
   assignIfChanged("bootSearchDepth", form.bootSearchDepth, settings.bootSearchDepth);
@@ -164,8 +174,10 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
   const [chatModels, setChatModels] = useState<ChatModelListResponse | null>(null);
+  const [imageModels, setImageModels] = useState<ChatModelListResponse | null>(null);
   const [chatModelsLoading, setChatModelsLoading] = useState(false);
   const [chatModelsError, setChatModelsError] = useState<string | null>(null);
+  const [imageModelsError, setImageModelsError] = useState<string | null>(null);
   const [draft, dispatchDraft] = useReducer(runtimeSettingsDraftReducer, initialRuntimeSettingsDraft);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -177,18 +189,29 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
     dispatchDraft({ type: "updateForm", patch });
   }, []);
 
-  const loadChatModels = useCallback(async () => {
+  const loadModels = useCallback(async (forceRefresh = false) => {
     setChatModelsLoading(true);
     setChatModelsError(null);
-    try {
-      const response = await apiClient.api.system.models.chat.$get();
-      setChatModels(await readJson<ChatModelListResponse>(response));
-    } catch (requestError) {
+    setImageModelsError(null);
+    const query = { refresh: forceRefresh ? "true" : "false" } as const;
+    const [chatResult, imageResult] = await Promise.allSettled([
+      apiClient.api.system.models.chat.$get({ query }).then((response) => readJson<ChatModelListResponse>(response)),
+      apiClient.api.system.models.image.$get({ query }).then((response) => readJson<ChatModelListResponse>(response))
+    ]);
+
+    if (chatResult.status === "fulfilled") {
+      setChatModels(chatResult.value);
+    } else {
       setChatModels(null);
-      setChatModelsError(errorMessage(requestError));
-    } finally {
-      setChatModelsLoading(false);
+      setChatModelsError(errorMessage(chatResult.reason));
     }
+    if (imageResult.status === "fulfilled") {
+      setImageModels(imageResult.value);
+    } else {
+      setImageModels(null);
+      setImageModelsError(errorMessage(imageResult.reason));
+    }
+    setChatModelsLoading(false);
   }, []);
 
   const load = useCallback(async () => {
@@ -213,8 +236,8 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
 
   useEffect(() => {
     load();
-    loadChatModels();
-  }, [load, loadChatModels]);
+    loadModels();
+  }, [load, loadModels]);
 
   const rows = useMemo(
     () => [
@@ -225,6 +248,9 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
       [t("runtime.runtimeDb"), formatStatus(system?.runtimeSettingsConfigured ? "configured" : "missing")],
       [t("runtime.secretStorage"), formatStatus(system?.runtimeSettingsSecretStorageReady ? "configured" : "missing")],
       [t("runtime.chatModel"), system?.bootChatModel ?? "-"],
+      [t("runtime.summaryModel"), system?.bootSummaryModel ?? "-"],
+      [t("runtime.memoryModel"), system?.bootMemoryModel ?? "-"],
+      [t("runtime.toolModel"), system?.bootToolModel ?? "-"],
       [t("runtime.embeddingModel"), system?.bootEmbeddingModel ?? "-"],
       [t("runtime.imageModel"), system?.bootImageModel ?? "-"],
       [t("runtime.searchProvider"), formatSearchProvider(system?.bootSearchProvider ?? "disabled")]
@@ -255,7 +281,7 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
       setSettings(payload.data);
       dispatchDraft({ type: "reset", settings: payload.data });
       await load();
-      await loadChatModels();
+      await loadModels();
       setNotice(t("system.settingsSaved"));
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -271,7 +297,7 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
       error={error}
       loading={!system && !error}
       onRefresh={async () => {
-        await Promise.all([load(), loadChatModels()]);
+        await Promise.all([load(), loadModels(true)]);
       }}
     >
       {notice && (
@@ -307,11 +333,13 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
                 chatModels={chatModels}
                 chatModelsError={chatModelsError}
                 chatModelsLoading={chatModelsLoading}
+                imageModels={imageModels}
+                imageModelsError={imageModelsError}
                 form={form}
                 settings={settings}
                 t={t}
                 updateForm={updateForm}
-                onRefreshChatModels={loadChatModels}
+                onRefreshModels={() => loadModels(true)}
               />
               <SearchAndSecretSections
                 canWriteSystem={canWriteSystem}
@@ -393,24 +421,34 @@ function EndpointAndModelSections({
   chatModels,
   chatModelsError,
   chatModelsLoading,
+  imageModels,
+  imageModelsError,
   form,
   settings,
   t,
   updateForm,
-  onRefreshChatModels
+  onRefreshModels
 }: {
   canWriteSystem: boolean;
   chatModels: ChatModelListResponse | null;
   chatModelsError: string | null;
   chatModelsLoading: boolean;
+  imageModels: ChatModelListResponse | null;
+  imageModelsError: string | null;
   form: RuntimeSettingsForm;
   settings: RuntimeSettings;
   t: I18nContextValue["t"];
   updateForm: (patch: Partial<RuntimeSettingsForm>) => void;
-  onRefreshChatModels: () => void | Promise<void>;
+  onRefreshModels: () => void | Promise<void>;
 }) {
   const chatModelIds = chatModels?.models.map((model) => model.id) ?? [];
-  const invalidCurrentModel = chatModelIds.length > 0 && !chatModelIds.includes(form.bootChatModel);
+  const imageModelIds = imageModels?.models.map((model) => model.id) ?? [];
+  const languageFields = [
+    ["bootChatModel", "system.chatModel"],
+    ["bootSummaryModel", "system.summaryModel"],
+    ["bootMemoryModel", "system.memoryModel"],
+    ["bootToolModel", "system.toolModel"]
+  ] as const satisfies ReadonlyArray<[keyof RuntimeSettingsForm, TranslationKey]>;
 
   return (
     <div className="grid gap-4 xl:grid-cols-2">
@@ -458,53 +496,84 @@ function EndpointAndModelSections({
       </div>
 
       <div className="grid gap-3 rounded-lg border border-zinc-200 p-4">
-        <div>
-          <h3 className="text-sm font-semibold text-zinc-950">{t("system.modelMapping")}</h3>
-          <p className="mt-1 text-xs leading-5 text-zinc-500">{t("system.modelHelp")}</p>
-        </div>
-        <div className="grid gap-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-zinc-700">{t("system.chatModel")}</span>
-            <Button disabled={chatModelsLoading} size="sm" type="button" variant="outline" onClick={onRefreshChatModels}>
-              <RefreshCw className={cn("size-3.5", chatModelsLoading && "animate-spin")} />
-              {t("common.refresh")}
-            </Button>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-950">{t("system.modelMapping")}</h3>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">{t("system.modelHelp")}</p>
           </div>
-          <Input
-            disabled={!canWriteSystem}
-            list="chat-model-options"
-            value={form.bootChatModel}
-            onChange={(event) => updateForm({ bootChatModel: event.target.value })}
-          />
-          {chatModelIds.length > 0 && (
-            <datalist id="chat-model-options">
-              {chatModelIds.map((modelId) => (
-                <option key={modelId} value={modelId} />
-              ))}
-            </datalist>
+          <Button disabled={chatModelsLoading} size="sm" type="button" variant="outline" onClick={onRefreshModels}>
+            <RefreshCw className={cn("size-3.5", chatModelsLoading && "animate-spin")} />
+            {t("common.refresh")}
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+          <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
+            {chatModelsError
+              ? t("system.chatModelListUnavailable")
+              : chatModelsLoading
+                ? t("common.checking")
+                : t("system.chatModelListLoaded", { count: chatModels?.models.length ?? 0 })}
+          </Badge>
+          <Badge tone={imageModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
+            {imageModelsError
+              ? t("system.imageModelListUnavailable")
+              : chatModelsLoading
+                ? t("common.checking")
+                : t("system.imageModelListLoaded", { count: imageModels?.models.length ?? 0 })}
+          </Badge>
+          {chatModels?.cacheStatus === "stale_cache" && <Badge tone="warning">{t("system.modelListStale")}</Badge>}
+          {chatModels?.source && (
+            <span className="min-w-0 truncate" title={chatModels.source}>
+              {chatModels.source}
+            </span>
           )}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-            <Badge tone={chatModelsError ? "warning" : chatModelsLoading ? "info" : "success"}>
-              {chatModelsError
-                ? t("system.modelListUnavailable")
-                : chatModelsLoading
-                  ? t("common.checking")
-                  : t("system.modelListLoaded", { count: chatModels?.models.length ?? 0 })}
-            </Badge>
-            {invalidCurrentModel && <Badge tone="warning">{t("system.currentModelMustChange")}</Badge>}
-            {chatModelsError && <span className="min-w-0 truncate">{chatModelsError}</span>}
-            {chatModels?.source && <span className="min-w-0 truncate" title={chatModels.source}>{chatModels.source}</span>}
-          </div>
+          {chatModels?.fetchedAt && (
+            <time className="whitespace-nowrap" dateTime={chatModels.fetchedAt}>
+              {t("system.modelListUpdated", { value: new Date(chatModels.fetchedAt).toLocaleString() })}
+            </time>
+          )}
+          {chatModelsError && <span className="min-w-0 truncate">{chatModelsError}</span>}
+          {imageModelsError && imageModelsError !== chatModelsError && (
+            <span className="min-w-0 truncate">{imageModelsError}</span>
+          )}
         </div>
+        <datalist id="chat-model-options">
+          {chatModelIds.map((modelId) => (
+            <option key={modelId} value={modelId} />
+          ))}
+        </datalist>
+        <datalist id="image-model-options">
+          {imageModelIds.map((modelId) => (
+            <option key={modelId} value={modelId} />
+          ))}
+        </datalist>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {languageFields.map(([field, label]) => (
+            <ModelPicker
+              canWriteSystem={canWriteSystem}
+              invalid={chatModelIds.length > 0 && !chatModelIds.includes(form[field] as string)}
+              key={field}
+              label={t(label)}
+              list="chat-model-options"
+              value={form[field] as string}
+              warning={t("system.currentModelMustChange")}
+              onChange={(value) => updateForm({ [field]: value } as Partial<RuntimeSettingsForm>)}
+            />
+          ))}
+        </div>
+        <ModelPicker
+          canWriteSystem={canWriteSystem}
+          invalid={imageModelIds.length > 0 && !imageModelIds.includes(form.bootImageModel)}
+          label={t("system.imageModel")}
+          list="image-model-options"
+          value={form.bootImageModel}
+          warning={t("system.currentModelMustChange")}
+          onChange={(value) => updateForm({ bootImageModel: value })}
+        />
         <Label>
           {t("system.embeddingModel")}
-          <Input disabled={!canWriteSystem} readOnly value={form.bootEmbeddingModel} />
-          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
-        </Label>
-        <Label>
-          {t("system.imageModel")}
-          <Input disabled={!canWriteSystem} readOnly value={form.bootImageModel} />
-          <span className="text-xs font-normal text-zinc-500">{t("system.fixedModel")}</span>
+          <Input disabled readOnly value={form.bootEmbeddingModel} />
+          <span className="text-xs font-normal text-zinc-500">{t("system.localEmbeddingModel")}</span>
         </Label>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -520,6 +589,34 @@ function EndpointAndModelSections({
         </div>
       </div>
     </div>
+  );
+}
+
+function ModelPicker({
+  canWriteSystem,
+  invalid,
+  label,
+  list,
+  value,
+  warning,
+  onChange
+}: {
+  canWriteSystem: boolean;
+  invalid: boolean;
+  label: string;
+  list: string;
+  value: string;
+  warning: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Label>
+      <span className="flex items-center justify-between gap-2">
+        {label}
+        {invalid && <Badge tone="warning">{warning}</Badge>}
+      </span>
+      <Input disabled={!canWriteSystem} list={list} value={value} onChange={(event) => onChange(event.target.value)} />
+    </Label>
   );
 }
 

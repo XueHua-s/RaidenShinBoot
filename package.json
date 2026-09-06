@@ -19,10 +19,13 @@
     "admin:bootstrap": "pnpm --filter @raiden/server admin:bootstrap",
     "db:generate": "pnpm --filter @raiden/database db:generate",
     "db:migrate": "pnpm --filter @raiden/database db:migrate",
+    "db:backfill-embeddings": "tsx --conditions=source scripts/backfill-memory-embeddings.ts",
     "db:studio": "pnpm --filter @raiden/database db:studio",
     "prepare": "husky",
-    "test": "pnpm run test:tools && pnpm run test:e2e",
+    "test": "pnpm run test:tools && pnpm run test:bot && pnpm run test:queues && pnpm run test:e2e",
+    "test:bot": "tsx --conditions=source scripts/bot-runtime-smoke.ts",
     "test:e2e": "tsx --conditions=source scripts/e2e-smoke.ts",
+    "test:queues": "pnpm --filter @raiden/boot exec tsx --conditions=source scripts/queue-smoke.ts",
     "test:tools": "tsx --conditions=source scripts/boot-tool-runtime-smoke.ts"
   },
   "devDependencies": {

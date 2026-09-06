@@ -54,6 +54,9 @@ export const telegramRoute = new Hono<{ Variables: AuthVariables }>()
     if (body.policy !== undefined) {
       updates.policy = body.policy;
     }
+    if (body.replyMode !== undefined) {
+      updates.replyMode = body.replyMode;
+    }
 
     const { before, after } = await updateTelegramChat(chatId, updates);
     if (!after) {

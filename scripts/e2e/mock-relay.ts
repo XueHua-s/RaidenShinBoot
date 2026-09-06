@@ -85,9 +85,10 @@ function handleModels(res: ServerResponse) {
     object: "list",
     data: [
       { id: "mock-chat", object: "model" },
+      { id: "mock-unavailable", object: "model" },
       { id: "mock-responses-only", object: "model" },
-      { id: "text-embedding-3-large", object: "model" },
-      { id: "chatgpt-image-latest", object: "model" }
+      { id: "mock-embedding", object: "model" },
+      { id: "gpt-image-2-codex", object: "model" }
     ]
   });
 }
@@ -110,12 +111,12 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, s
   const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
   const prompt = body.messages?.find((message) => message.role === "user")?.content ?? "";
 
-  if (body.model === "mock-responses-only") {
+  if (body.model === "mock-responses-only" || body.model === "mock-unavailable") {
     state.chatCompletionFailures += 1;
-    sendJson(res, 429, {
+    sendJson(res, body.model === "mock-responses-only" ? 404 : 429, {
       error: {
-        message: "usage_limit_reached",
-        code: "usage_limit_reached"
+        message: body.model === "mock-responses-only" ? "chat_completions_not_supported" : "usage_limit_reached",
+        code: body.model === "mock-responses-only" ? "unsupported_endpoint" : "usage_limit_reached"
       }
     });
     return;
@@ -157,6 +158,11 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, state:
       .filter((content) => content.type === "input_text")
       .map((content) => content.text)
       .join("\n") ?? "";
+  if (body.model === "mock-unavailable") {
+    state.chatCompletionFailures += 1;
+    sendJson(res, 503, { error: { message: "model_unavailable", code: "model_unavailable" } });
+    return;
+  }
   const content = resolveMockChatContent(body.instructions ?? "", prompt, state);
   state.responsesPrompts.push(prompt);
 
@@ -336,11 +342,11 @@ function resolveMockChatContent(system: string, prompt: string, state: MockRelay
   if (prompt.includes("搜索状态")) {
     return "我已经查到资料，并会把来源与当下信息一起纳入判断。";
   }
-  if (prompt.includes("长期记忆：\n1. 用户喜欢被称作小雪，并喜欢稻妻茶点")) {
+  if (prompt.includes("用户喜欢被称作小雪，并喜欢稻妻茶点")) {
     state.memoryPrompts.push(prompt);
     return "小雪，我记得你喜欢稻妻茶点；这样的印象我会好好留在心里。";
   }
-  if (prompt.includes("长期记忆：\n1. 用户在 bot 路径喜欢被称作小雪，并喜欢团子牛奶")) {
+  if (prompt.includes("用户在 bot 路径喜欢被称作小雪，并喜欢团子牛奶")) {
     state.memoryPrompts.push(prompt);
     return "小雪，我记得在 bot 路径里你喜欢团子牛奶，这也是我对你的清晰印象。";
   }
@@ -430,7 +436,7 @@ async function readBody(req: IncomingMessage) {
 function mockEmbedding(input: unknown) {
   const text = Array.isArray(input) ? input.join(" ") : String(input ?? "");
   const direction = /记得|印象|有什么印象|remember|impression/i.test(text) ? -1 : 1;
-  return Array.from({ length: 3072 }, (_, index) => direction * (((index % 29) + 1) / 1000));
+  return Array.from({ length: 512 }, (_, index) => direction * (((index % 29) + 1) / 1000));
 }
 
 function extractUserMessage(prompt: string) {

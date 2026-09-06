@@ -3,13 +3,15 @@ import { isMemoryMutationRequest, isMemoryRecallRequest } from "@raiden/shared";
 import { shouldUseExplicitMakotoImageForMessage } from "@raiden/shared/boot";
 import { shouldUseBootSearchForMessage } from "@raiden/shared/tools";
 
-export const conversationCachePolicyVersion = "conversation-cache-v3";
+export const conversationCachePolicyVersion = "conversation-cache-v5";
 
 export type ConversationCacheFingerprintInput = {
   protocol: string;
   userId: string;
   chatModel: string;
   embeddingModel: string;
+  personaHash: string;
+  userDisplayName: string | null;
   searchProvider: string;
   history: Array<{
     id?: string | undefined;
@@ -30,8 +32,8 @@ const contextualCjkQueryPattern =
   /(继续|接着|刚才|上面|前面|上一条|前一条|之前|这个|这件|这些|那个|那件|那些|它|他们|她们|他说|她说|你说|再来|展开一下|总结一下)/i;
 const contextualEnglishQueryPattern = /\b(continue|previous|above|earlier|that|this|it|they|more)\b/i;
 
-export function conversationCacheScope(input: { protocol: string; userId: string }) {
-  return `${input.protocol}:${input.userId}`;
+export function conversationCacheScope(input: { scopeKey: string } | { protocol: string; userId: string }) {
+  return "scopeKey" in input ? input.scopeKey : `${input.protocol}:direct:main:user:${input.userId}`;
 }
 
 export function normalizeCacheQuery(content: string) {
@@ -67,6 +69,8 @@ export function buildConversationCacheContextFingerprint(input: ConversationCach
     input.userId,
     input.chatModel,
     input.embeddingModel,
+    input.personaHash,
+    input.userDisplayName ?? "",
     input.searchProvider,
     JSON.stringify(
       input.history.map((message) => ({
