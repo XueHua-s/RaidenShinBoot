@@ -189,29 +189,44 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
     dispatchDraft({ type: "updateForm", patch });
   }, []);
 
-  const loadModels = useCallback(async (forceRefresh = false) => {
+  const loadModels = useCallback(async (forceRefresh = false, signal?: AbortSignal) => {
     setChatModelsLoading(true);
     setChatModelsError(null);
     setImageModelsError(null);
     const query = { refresh: forceRefresh ? "true" : "false" } as const;
-    const [chatResult, imageResult] = await Promise.allSettled([
-      apiClient.api.system.models.chat.$get({ query }).then((response) => readJson<ChatModelListResponse>(response)),
-      apiClient.api.system.models.image.$get({ query }).then((response) => readJson<ChatModelListResponse>(response))
-    ]);
 
-    if (chatResult.status === "fulfilled") {
-      setChatModels(chatResult.value);
-    } else {
+    try {
+      const [chatResult, imageResult] = await Promise.allSettled([
+        fetch(apiClient.api.system.models.chat.$url({ query }).toString(), signal ? { signal } : undefined)
+          .then((response) => readJson<ChatModelListResponse>(response)),
+        fetch(apiClient.api.system.models.image.$url({ query }).toString(), signal ? { signal } : undefined)
+          .then((response) => readJson<ChatModelListResponse>(response))
+      ]);
+
+      if (signal?.aborted) return;
+
+      if (chatResult.status === "fulfilled") {
+        setChatModels(chatResult.value);
+      } else {
+        setChatModels(null);
+        setChatModelsError(errorMessage(chatResult.reason));
+      }
+      if (imageResult.status === "fulfilled") {
+        setImageModels(imageResult.value);
+      } else {
+        setImageModels(null);
+        setImageModelsError(errorMessage(imageResult.reason));
+      }
+    } catch (error) {
+      if (signal?.aborted) return;
       setChatModels(null);
-      setChatModelsError(errorMessage(chatResult.reason));
-    }
-    if (imageResult.status === "fulfilled") {
-      setImageModels(imageResult.value);
-    } else {
       setImageModels(null);
-      setImageModelsError(errorMessage(imageResult.reason));
+      setChatModelsError(errorMessage(error));
+    } finally {
+      if (!signal?.aborted) {
+        setChatModelsLoading(false);
+      }
     }
-    setChatModelsLoading(false);
   }, []);
 
   const load = useCallback(async () => {
@@ -235,8 +250,12 @@ export function SystemPage({ user }: { user: AdminUserDto }) {
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
     load();
-    loadModels();
+    loadModels(false, controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, [load, loadModels]);
 
   const rows = useMemo(

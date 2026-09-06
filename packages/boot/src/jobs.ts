@@ -1,4 +1,5 @@
 import { Queue, Worker, type Job, type Processor, type QueueOptions, type WorkerOptions } from "bullmq";
+import { createClient } from "redis";
 
 export const telegramUpdateQueueName = "raiden-telegram-updates";
 export const memoryEnrichmentQueueName = "raiden-memory-enrichment";
@@ -279,15 +280,32 @@ export async function enqueueImageGeneration(input: ImageGenerationJob, config =
   if (!isBootQueueConfigured(config)) {
     throw new BootQueueUnavailableError("REDIS_URL is required before image tasks can be queued");
   }
+
+  const redisClient = createClient({ url: config.redisUrl! });
+  redisClient.on("error", () => undefined);
   const queue = new Queue<ImageGenerationJob>(imageGenerationQueueName, producerQueueOptions(config));
   queue.on("error", () => undefined);
+
   try {
+    await redisClient.connect();
+    const quotaKey = `${config.prefix}:image-quota:${input.userId}`;
+    const existingTaskId = await redisClient.get(quotaKey);
+
+    if (existingTaskId && existingTaskId !== input.taskId) {
+      const existingJob = await queue.getJob(existingTaskId);
+      if (existingJob) {
+        const state = await existingJob.getState();
+        if (state === "waiting" || state === "active" || state === "delayed") {
+          throw new ImageGenerationQuotaError(existingTaskId);
+        }
+      }
+    }
+
+    await redisClient.set(quotaKey, input.taskId, { EX: 3600 });
+
     const candidate = await withQueueTimeout(
       queue.add("image.generate", input, {
         jobId: input.taskId,
-        deduplication: {
-          id: `image-user-${input.userId}`
-        },
         attempts: 2,
         backoff: { type: "exponential", delay: 3_000 },
         removeOnComplete: { age: 86_400, count: 2_000 },
@@ -296,20 +314,23 @@ export async function enqueueImageGeneration(input: ImageGenerationJob, config =
       config.enqueueTimeoutMs,
       "Image task enqueue"
     );
+
     if (!candidate.id) {
+      await redisClient.del(quotaKey);
       throw new Error("Image queue returned a job without an id");
     }
-    if (candidate.id !== input.taskId) {
-      throw new ImageGenerationQuotaError(candidate.id);
-    }
+
     const persisted = await withQueueTimeout(
       queue.getJob(candidate.id),
       config.enqueueTimeoutMs,
       "Image task verification"
     );
+
     if (!persisted) {
+      await redisClient.del(quotaKey);
       throw new Error("Image queue could not reload the queued job");
     }
+
     return {
       id: candidate.id,
       data: persisted.data,
@@ -322,6 +343,7 @@ export async function enqueueImageGeneration(input: ImageGenerationJob, config =
     }
     throw toQueueUnavailableError(error, "Image task enqueue failed");
   } finally {
+    await redisClient.disconnect();
     await closeProducerQueue(queue, config.enqueueTimeoutMs);
   }
 }
@@ -330,7 +352,32 @@ export function createImageGenerationWorker(
   processor: Processor<ImageGenerationJob, ImageGenerationResult, string>,
   config = getBootQueueConfig()
 ) {
-  return new Worker<ImageGenerationJob, ImageGenerationResult, string>(imageGenerationQueueName, processor, {
+  const wrappedProcessor: Processor<ImageGenerationJob, ImageGenerationResult, string> = async (job) => {
+    const redisClient = createClient({ url: config.redisUrl! });
+    redisClient.on("error", () => undefined);
+    try {
+      const result = await processor(job);
+      await redisClient.connect();
+      const quotaKey = `${config.prefix}:image-quota:${job.data.userId}`;
+      const currentTaskId = await redisClient.get(quotaKey);
+      if (currentTaskId === job.data.taskId) {
+        await redisClient.del(quotaKey);
+      }
+      return result;
+    } catch (error) {
+      await redisClient.connect();
+      const quotaKey = `${config.prefix}:image-quota:${job.data.userId}`;
+      const currentTaskId = await redisClient.get(quotaKey);
+      if (currentTaskId === job.data.taskId) {
+        await redisClient.del(quotaKey);
+      }
+      throw error;
+    } finally {
+      await redisClient.disconnect();
+    }
+  };
+
+  return new Worker<ImageGenerationJob, ImageGenerationResult, string>(imageGenerationQueueName, wrappedProcessor, {
     connection: workerConnection(config),
     prefix: config.prefix,
     concurrency: config.imageConcurrency
@@ -366,9 +413,14 @@ export async function cancelImageGenerationTask(taskId: string, userId: string, 
   if (!isBootQueueConfigured(config)) {
     throw new BootQueueUnavailableError("REDIS_URL is required to cancel image tasks");
   }
+
+  const redisClient = createClient({ url: config.redisUrl! });
+  redisClient.on("error", () => undefined);
   const queue = new Queue<ImageGenerationJob>(imageGenerationQueueName, producerQueueOptions(config));
   queue.on("error", () => undefined);
+
   try {
+    await redisClient.connect();
     const job = await withQueueTimeout(queue.getJob(taskId), config.enqueueTimeoutMs, "Image task lookup");
     if (!job || job.data.userId !== userId) {
       return "not_found" as const;
@@ -387,8 +439,16 @@ export async function cancelImageGenerationTask(taskId: string, userId: string, 
       return state;
     }
     await job.remove();
+
+    const quotaKey = `${config.prefix}:image-quota:${userId}`;
+    const currentTaskId = await redisClient.get(quotaKey);
+    if (currentTaskId === taskId) {
+      await redisClient.del(quotaKey);
+    }
+
     return "cancelled" as const;
   } finally {
+    await redisClient.disconnect();
     await closeProducerQueue(queue, config.enqueueTimeoutMs);
   }
 }

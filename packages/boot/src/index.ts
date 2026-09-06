@@ -168,30 +168,41 @@ function envFlag(value: string | undefined, fallback: boolean) {
   return !["0", "false", "no", "off", "disabled"].includes(normalized);
 }
 
+function buildPrivacyScopeFilter(
+  privacyMode: "normal" | "isolated" | "off",
+  sourceChatId: string | null | undefined,
+  sourceThreadId: string | null | undefined
+): { sourceChatId?: string | null; sourceThreadId?: string | null } {
+  if (privacyMode !== "isolated") {
+    return {};
+  }
+  return {
+    sourceChatId: sourceChatId ?? null,
+    sourceThreadId: sourceThreadId ?? null
+  };
+}
+
 function privateMemoryScopeFilter(
   privacyMode: "normal" | "isolated" | "off",
   sourceChatId: string | null | undefined,
   sourceThreadId: string | null | undefined
-) {
-  return privacyMode === "isolated"
-    ? {
-        privateSourceChatId: sourceChatId ?? null,
-        privateSourceThreadId: sourceThreadId ?? null
-      }
-    : {};
+): { privateSourceChatId?: string | null; privateSourceThreadId?: string | null } {
+  const filter = buildPrivacyScopeFilter(privacyMode, sourceChatId, sourceThreadId);
+  if (Object.keys(filter).length === 0) {
+    return {};
+  }
+  return {
+    privateSourceChatId: filter.sourceChatId!,
+    privateSourceThreadId: filter.sourceThreadId!
+  };
 }
 
 function cacheMemoryScopeFilter(
   privacyMode: "normal" | "isolated" | "off",
   sourceChatId: string | null | undefined,
   sourceThreadId: string | null | undefined
-) {
-  return privacyMode === "isolated"
-    ? {
-        sourceChatId: sourceChatId ?? null,
-        sourceThreadId: sourceThreadId ?? null
-      }
-    : {};
+): { sourceChatId?: string | null; sourceThreadId?: string | null } {
+  return buildPrivacyScopeFilter(privacyMode, sourceChatId, sourceThreadId);
 }
 
 function deterministicConversationToolDecision(content: string): BootToolDecision | null {
@@ -594,7 +605,8 @@ export async function runBootConversation(input: BootConversationInput) {
     bootConfig,
     searchConfig,
     history: recentMessages,
-    memories: cacheContextMemories
+    memories: cacheContextMemories,
+    privacyMode
   });
 
   const history = recentMessages.map((message: { role: string; content: string }) => ({
@@ -1048,6 +1060,7 @@ function buildCacheContextFingerprint(input: {
   searchConfig: ReturnType<typeof getBootSearchConfig>;
   history: CacheContextMessage[];
   memories: CacheContextMemory[];
+  privacyMode: "normal" | "isolated" | "off";
 }) {
   return buildConversationCacheContextFingerprint({
     protocol: input.identity.protocol,
@@ -1057,6 +1070,7 @@ function buildCacheContextFingerprint(input: {
     personaHash: input.bootConfig.PERSONA_HASH,
     userDisplayName: input.identity.firstName ?? input.identity.username ?? null,
     searchProvider: input.searchConfig.BOOT_SEARCH_PROVIDER,
+    privacyMode: input.privacyMode,
     history: input.history,
     memories: input.memories
   });
@@ -1094,7 +1108,8 @@ function refreshConversationCacheInBackground(input: {
       bootConfig: input.bootConfig,
       searchConfig: input.searchConfig,
       history,
-      memories
+      memories,
+      privacyMode: input.privacyMode
     });
     const result = await writeConversationCache({
       userId: input.userId,

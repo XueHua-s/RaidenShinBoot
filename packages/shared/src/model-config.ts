@@ -180,6 +180,11 @@ export function parseModelConfigurationYaml(source: string): ModelConfiguration 
   return modelConfigurationSchema.parse(parseYaml(source));
 }
 
+function loadModelConfiguration(path: string): ModelConfiguration {
+  const source = readFileSync(path, "utf8");
+  return parseModelConfigurationYaml(source);
+}
+
 export function getModelConfiguration(env: NodeJS.ProcessEnv = process.env): ModelConfiguration {
   const configuredPath = env.RAIDEN_MODEL_CONFIG?.trim();
   const path = configuredPath
@@ -188,7 +193,7 @@ export function getModelConfiguration(env: NodeJS.ProcessEnv = process.env): Mod
 
   if (!existsSync(path)) {
     if (cachedConfiguration?.path === path) {
-      warnOnceForFailedReload(path, "missing", "file does not exist");
+      warnOnceForFailedReload(path, "file does not exist");
       return cachedConfiguration.configuration;
     }
     if (configuredPath) {
@@ -203,13 +208,13 @@ export function getModelConfiguration(env: NodeJS.ProcessEnv = process.env): Mod
     if (cachedConfiguration?.path === path && cachedConfiguration.modifiedAtMs === modifiedAtMs) {
       return cachedConfiguration.configuration;
     }
-    const configuration = parseModelConfigurationYaml(readFileSync(path, "utf8"));
+    const configuration = loadModelConfiguration(path);
     cachedConfiguration = { path, modifiedAtMs, configuration };
     lastFailedReload = null;
     return configuration;
   } catch (error) {
     if (cachedConfiguration?.path === path) {
-      warnOnceForFailedReload(path, String(modifiedAtMs ?? "unreadable"), summarizeConfigurationError(error));
+      warnOnceForFailedReload(path, summarizeConfigurationError(error));
       return cachedConfiguration.configuration;
     }
     throw error;
@@ -221,8 +226,8 @@ export function clearModelConfigurationCache() {
   lastFailedReload = null;
 }
 
-function warnOnceForFailedReload(path: string, version: string, message: string) {
-  const failureKey = `${path}:${version}:${message}`;
+function warnOnceForFailedReload(path: string, message: string) {
+  const failureKey = `${path}:${message}`;
   if (failureKey === lastFailedReload) {
     return;
   }

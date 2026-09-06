@@ -13,6 +13,7 @@ export type ConversationCacheFingerprintInput = {
   personaHash: string;
   userDisplayName: string | null;
   searchProvider: string;
+  privacyMode: "normal" | "isolated" | "off";
   history: Array<{
     id?: string | undefined;
     role: string;
@@ -72,6 +73,7 @@ export function buildConversationCacheContextFingerprint(input: ConversationCach
     input.personaHash,
     input.userDisplayName ?? "",
     input.searchProvider,
+    input.privacyMode,
     JSON.stringify(
       input.history.map((message) => ({
         id: message.id ?? null,
