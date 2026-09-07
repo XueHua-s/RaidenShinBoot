@@ -5,12 +5,14 @@ import {
   createMemory,
   findConversationTurnByTelegramMessage,
   getRecentMessages,
+  getChatModelPreference,
   getTelegramUser,
   getRuntimeSettingsEnvOverrides,
   listMemories,
   saveConversationTurn,
   searchMemories,
   softDeleteMemories,
+  setChatModelPreference,
   type NewRuntimeSetting,
   type ConversationScopeInput,
   updateTelegramUserPrivacyMode,
@@ -104,6 +106,37 @@ type DurableMemoryInput = {
 };
 
 type RuntimeEnv = NodeJS.ProcessEnv;
+
+export type BootModelScope = BootUserIdentity & {
+  sourceChatId?: string | null;
+  sourceChatType?: BootConversationInput["sourceChatType"];
+};
+
+export function resolveBootModelScope(input: BootModelScope) {
+  const chatId = input.sourceChatId?.trim();
+  if (!chatId && ["group", "supergroup", "channel"].includes(input.sourceChatType ?? "")) {
+    throw new Error("A shared model scope requires a chat id.");
+  }
+  // Telegram direct API calls and private bot messages belong to the same private chat.
+  // Topic IDs and the acting group member intentionally do not participate in this key.
+  const scopeType = chatId || input.protocol === "telegram" ? "chat" : "user";
+  return JSON.stringify([input.protocol, scopeType, chatId || input.userId]);
+}
+
+async function loadConversationRuntimeEnv(scope?: BootModelScope): Promise<RuntimeEnv> {
+  const env = await loadRuntimeEnv();
+  if (!scope || !process.env.DATABASE_URL) {
+    return env;
+  }
+  const modelId = await getChatModelPreference(resolveBootModelScope(scope));
+  return modelId ? {
+    ...env,
+    BOOT_CHAT_MODEL: modelId,
+    BOOT_TOOL_MODEL: modelId,
+    BOOT_SUMMARY_MODEL: modelId,
+    BOOT_MEMORY_MODEL: modelId
+  } : env;
+}
 
 type CacheContextMessage = {
   id?: string | undefined;
@@ -335,8 +368,8 @@ export async function loadRuntimeEnv() {
   }
 }
 
-export async function getEffectiveBootConfig() {
-  return getBootConfig(await loadRuntimeEnv());
+export async function getEffectiveBootConfig(scope?: BootModelScope) {
+  return getBootConfig(await loadConversationRuntimeEnv(scope));
 }
 
 export async function getEffectiveBootSearchConfig() {
@@ -408,6 +441,24 @@ export async function listEffectiveChatModels(forceRefresh = false) {
   return listChatModels(await getEffectiveBootConfig(), forceRefresh);
 }
 
+export async function listConversationChatModels(scope: BootModelScope, forceRefresh = false) {
+  return listChatModels(await getEffectiveBootConfig(scope), forceRefresh);
+}
+
+export async function switchConversationChatModel(scope: BootModelScope, requestedModelId: string) {
+  const modelId = requestedModelId.trim();
+  const scopeKey = resolveBootModelScope(scope);
+  const config = await getEffectiveBootConfig();
+  const catalog = await validateChatModel(modelId, config);
+  const result = await setChatModelPreference({
+    scopeKey,
+    modelId,
+    defaultModel: config.BOOT_CHAT_MODEL,
+    actorUserId: storageUserId(scope)
+  });
+  return { ...result, availableModelCount: catalog.models.length };
+}
+
 export async function listEffectiveImageModels(forceRefresh = false) {
   return listImageModels(await getEffectiveBootConfig(), forceRefresh);
 }
@@ -424,21 +475,7 @@ export async function switchEffectiveChatModel(input: {
   }
 
   const beforeConfig = await getEffectiveBootConfig();
-  if (!isLikelyChatModelId(modelId, beforeConfig)) {
-    throw new Error(`Model "${modelId}" does not look like a chat model.`);
-  }
-
-  const modelList = await listChatModels(beforeConfig);
-  const exists = modelList.models.some((model) => model.id === modelId);
-  if (!exists) {
-    throw new Error(`Model "${modelId}" was not found in the provider model list.`);
-  }
-
-  try {
-    await probeChatModel(modelId, beforeConfig);
-  } catch (error) {
-    throw new Error(`Model "${modelId}" failed the chat probe: ${error instanceof Error ? error.message : "unknown error"}`);
-  }
+  const modelList = await validateChatModel(modelId, beforeConfig);
 
   const setting: NewRuntimeSetting = {
     key: "BOOT_CHAT_MODEL",
@@ -470,6 +507,26 @@ export async function switchEffectiveChatModel(input: {
     afterModel: modelId,
     availableModelCount: modelList.models.length
   };
+}
+
+async function validateChatModel(modelId: string, config: Awaited<ReturnType<typeof getEffectiveBootConfig>>) {
+  if (!modelId || !isLikelyChatModelId(modelId, config)) {
+    throw new Error(`Model "${modelId}" does not look like a chat model.`);
+  }
+
+  const modelList = await listChatModels(config);
+  const exists = modelList.models.some((model) => model.id === modelId);
+  if (!exists) {
+    throw new Error(`Model "${modelId}" was not found in the provider model list.`);
+  }
+
+  try {
+    await probeChatModel(modelId, config);
+  } catch (error) {
+    throw new Error(`Model "${modelId}" failed the chat probe: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+
+  return modelList;
 }
 
 export async function switchEffectiveImageModel(input: {
@@ -561,7 +618,7 @@ function duplicateTelegramTurnReply(turn: NonNullable<Awaited<ReturnType<typeof 
 }
 
 export async function runBootConversation(input: BootConversationInput) {
-  const runtimeEnv = await loadRuntimeEnv();
+  const runtimeEnv = await loadConversationRuntimeEnv(input);
   const bootConfig = getBootConfig(runtimeEnv);
   const searchConfig = getBootSearchConfig(runtimeEnv);
   const semanticCacheConfig = getSemanticCacheConfig(runtimeEnv);
@@ -1153,7 +1210,8 @@ async function scheduleDurableMemoryIfUseful(
     displayName: input.displayName,
     content: input.content,
     reply: input.reply,
-    sourceMessageId: input.sourceMessageId
+    sourceMessageId: input.sourceMessageId,
+    memoryModel: input.bootConfig.BOOT_MEMORY_MODEL
   };
 
   if (isBootQueueConfigured(input.queueConfig) && envFlag(input.runtimeEnv.BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED, false)) {
@@ -1222,7 +1280,10 @@ export async function processMemoryEnrichmentJob(input: MemoryEnrichmentJob) {
   }
   await createDurableMemory({
     ...input,
-    bootConfig: await getEffectiveBootConfig()
+    bootConfig: {
+      ...await getEffectiveBootConfig(),
+      ...(input.memoryModel ? { BOOT_MEMORY_MODEL: input.memoryModel } : {})
+    }
   });
 }
 
@@ -1335,7 +1396,7 @@ export async function summarizeBootConversation(
       role: message.role as "user" | "assistant" | "system",
       content: message.content
     })),
-    config: await getEffectiveBootConfig(),
+    config: await getEffectiveBootConfig(input),
     maxCharacters: scope.shared ? 1200 : 1800
   });
 }

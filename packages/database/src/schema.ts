@@ -105,6 +105,13 @@ export const telegramUsers = pgTable("telegram_users", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+// Separate from history: clearing a conversation must not reset its chosen model.
+export const chatModelPreferences = pgTable("chat_model_preferences", {
+  scopeKey: text("scope_key").primaryKey(),
+  modelId: text("model_id").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull()
+});
+
 export const telegramChats = pgTable(
   "telegram_chats",
   {

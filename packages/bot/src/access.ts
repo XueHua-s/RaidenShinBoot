@@ -16,6 +16,9 @@ function textCommand(ctx: Context) {
   }
 
   const callbackNamespace = ctx.callbackQuery?.data?.split(":", 1)[0];
+  if (callbackNamespace === "model") {
+    return "model";
+  }
   if (callbackNamespace === "menu") {
     return "menu";
   }

@@ -146,7 +146,7 @@ export const telegramCommandPermissionSchema = z.object({
 export const upsertTelegramCommandPermissionRequestSchema = z.object({
   chatId: z.string().nullable().optional(),
   command: telegramCommandNameSchema.refine((command) => command !== "model", {
-    message: "/model is hidden and cannot be managed by command permission rules."
+    message: "/model is available to all approved chat members and cannot be disabled by command permission rules."
   }),
   enabled: z.boolean()
 });

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 export type MockRelayState = {
+  languageCalls: Array<{ model: string; prompt: string }>;
   chatPrompts: string[];
   chatCompletionFailures: number;
   responsesPrompts: string[];
@@ -16,6 +17,7 @@ export type MockRelayState = {
 
 export function createMockRelayState(): MockRelayState {
   return {
+    languageCalls: [],
     chatPrompts: [],
     chatCompletionFailures: 0,
     responsesPrompts: [],
@@ -122,6 +124,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, s
     return;
   }
 
+  state.languageCalls.push({ model: body.model ?? "mock-chat", prompt });
   const content = resolveMockChatContent(system, prompt, state);
 
   if (body.stream) {
@@ -163,6 +166,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse, state:
     sendJson(res, 503, { error: { message: "model_unavailable", code: "model_unavailable" } });
     return;
   }
+  state.languageCalls.push({ model: body.model ?? "mock-chat", prompt });
   const content = resolveMockChatContent(body.instructions ?? "", prompt, state);
   state.responsesPrompts.push(prompt);
 

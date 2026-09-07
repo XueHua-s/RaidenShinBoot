@@ -62,7 +62,11 @@ async function processImageGeneration(job: {
   }
 
   try {
-    const bootConfig = await getEffectiveBootConfig();
+    const bootConfig = await getEffectiveBootConfig({
+      protocol: "telegram",
+      userId: data.userId,
+      sourceChatId: data.chatId
+    });
     let prompt = data.prompt;
     try {
       prompt = await generateMakotoImagePrompt({

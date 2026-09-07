@@ -29,7 +29,9 @@ pnpm dev:bot
 pnpm dev:worker
 ```
 
-启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。语言与图片任务走 relay；embedding 默认只访问本机 sidecar，不需要远程 key。`/model`、`/provider`、`/status` 只允许 `BOT_ADMIN_IDS` 中的 Telegram 用户使用。
+启动 bot 前，需要在 `.env` 中填写 `BOT_TOKEN` 和 AI relay key。语言与图片任务走 relay；embedding 默认只访问本机 sidecar，不需要远程 key。`/provider`、`/status` 和全局图片模型切换只允许 `BOT_ADMIN_IDS` 中的 Telegram 用户使用。
+
+`/model` 对已获准会话中的所有成员开放，显示当前语言模型、支持列表和分页选择按钮；也可发送 `/model chat <model_id>`（或 `/model <model_id>`）。每个群和私聊独立保存选择，同群所有成员与话题共用，重启或 `/clear` 不会重置。未选择时使用后台全局默认配置。选择会用于该会话的回复、工具推理、总结和记忆提取，不改变图片或 embedding 模型；切换前验证目录和实际可用性，失败不覆盖原设置，已开始的回复继续使用原模型。受封禁、待审批或只读策略限制的会话不能切换。
 
 配置 `REDIS_URL` 后会启用 BullMQ 队列、Telegram webhook 入队、异步图片/提醒/记忆任务和 L1/L2 语义响应缓存。没有 Redis 时，本地 polling 对话仍可工作，长期记忆会回退到 inline 创建；图片和提醒命令会明确返回队列不可用，webhook 入队会稳定返回 503。
 
@@ -221,6 +223,7 @@ BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
 
 - `/start`、`/menu`、`/help`：欢迎、功能菜单与说明
 - `/draw <描述>`：创建异步图片任务
+- `/model`：查看当前会话模型和分页目录；所有成员可切换，群与私聊独立
 - `/memory`、`/privacy`、`/clear`：查看记忆、调整隐私、清理当前会话
 - `/remind`、`/timers`、`/cancel`：创建、查看和取消提醒或图片任务
 - `/stop`、`/resume`：中止当前生成并恢复新请求
@@ -228,7 +231,7 @@ BOOT_MOEGIRL_API_URL=https://zh.moegirl.org.cn/api.php
 
 Bot 管理员命令：
 
-- `/model`：查看或切换全局语言/图片模型
+- `/model list image`、`/model image <model_id>`：查看或切换全局图片模型
 - `/provider`：刷新并查看 provider 模型目录状态
 - `/status`：查看脱敏后的运行状态
 

@@ -5,6 +5,7 @@ import {
   adminSessions,
   adminUsers,
   auditLogs,
+  chatModelPreferences,
   conversations,
   memories,
   messages,
@@ -84,9 +85,42 @@ const defaultPagination = {
   offset: 0
 };
 const reservedTelegramCommandNames = new Set(["model"]);
-const hiddenTelegramCommandNames = [...reservedTelegramCommandNames, "/model"];
+const unmanagedTelegramCommandNames = [...reservedTelegramCommandNames, "/model"];
 
 const encryptedValuePrefix = "aes-256-gcm:v1";
+
+export async function getChatModelPreference(scopeKey: string) {
+  const [preference] = await getDatabase().select().from(chatModelPreferences)
+    .where(eq(chatModelPreferences.scopeKey, scopeKey)).limit(1);
+  return preference?.modelId ?? null;
+}
+
+export async function setChatModelPreference(input: {
+  scopeKey: string;
+  modelId: string;
+  defaultModel: string;
+  actorUserId: string;
+}) {
+  return getDatabase().transaction(async (tx) => {
+    const inserted = await tx.insert(chatModelPreferences)
+      .values({ scopeKey: input.scopeKey, modelId: input.modelId })
+      .onConflictDoNothing().returning();
+    // Lock the preference across group topics and worker processes, including its audit record.
+    const [previous] = await tx.select().from(chatModelPreferences)
+      .where(eq(chatModelPreferences.scopeKey, input.scopeKey)).for("update");
+    const beforeModel = inserted.length ? input.defaultModel : previous!.modelId;
+    await tx.update(chatModelPreferences).set({ modelId: input.modelId, updatedAt: new Date() })
+      .where(eq(chatModelPreferences.scopeKey, input.scopeKey));
+    await tx.insert(auditLogs).values({
+      action: "conversation.model_update",
+      targetType: "chat_model_preference",
+      targetId: input.scopeKey,
+      before: { modelId: beforeModel },
+      after: { modelId: input.modelId, actorUserId: input.actorUserId }
+    });
+    return { beforeModel, afterModel: input.modelId };
+  });
+}
 
 function toIsoDate<
   T extends {
@@ -721,7 +755,7 @@ export async function listTelegramCommandPermissions(
     .where(
       and(
         input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
-        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
+        notInArray(telegramCommandPermissions.command, unmanagedTelegramCommandNames)
       )
     )
     .orderBy(desc(telegramCommandPermissions.updatedAt))
@@ -739,7 +773,7 @@ export async function countTelegramCommandPermissions(input: { chatId?: string |
     .where(
       and(
         input.chatId ? eq(telegramCommandPermissions.chatId, input.chatId) : undefined,
-        notInArray(telegramCommandPermissions.command, hiddenTelegramCommandNames)
+        notInArray(telegramCommandPermissions.command, unmanagedTelegramCommandNames)
       )
     );
 
@@ -753,7 +787,7 @@ function normalizeTelegramCommandName(command: string) {
 function assertManageableTelegramCommand(command: string) {
   const normalizedCommand = normalizeTelegramCommandName(command);
   if (reservedTelegramCommandNames.has(normalizedCommand)) {
-    throw new Error("/model is hidden and cannot be managed by command permission rules.");
+    throw new Error("/model is available to all approved chat members and cannot be disabled by command permission rules.");
   }
 }
 

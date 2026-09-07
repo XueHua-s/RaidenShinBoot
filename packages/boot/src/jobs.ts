@@ -13,6 +13,7 @@ export type TelegramUpdateJob = {
 };
 
 export type MemoryEnrichmentJob = {
+  memoryModel?: string;
   userId: string;
   sourceChatId: string | null;
   sourceThreadId: string | null;

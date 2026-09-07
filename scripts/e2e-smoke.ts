@@ -47,6 +47,7 @@ import { replyAsMakoto } from "../packages/bot/src/conversation.js";
 import { TelegramInteractionPolicy } from "../packages/bot/src/interaction-policy.js";
 import { config } from "dotenv";
 import { createMockRelay, createMockRelayState, listen } from "./e2e/mock-relay.js";
+import { verifyConversationModels } from "./e2e/model-scope.js";
 
 config({ path: new URL("../.env", import.meta.url) });
 config();
@@ -492,6 +493,8 @@ async function main() {
       throw new Error("Runtime settings did not persist new-api relay and secret status");
     }
 
+    await verifyConversationModels(relayState);
+
     const chatModelsResponse = await authedRequest("/api/system/models/chat?refresh=true");
     if (!chatModelsResponse.ok) {
       throw new Error(
@@ -845,7 +848,7 @@ async function main() {
       command: "model"
     });
     if (!modelCommandAccess.allowed) {
-      throw new Error("Hidden /model command should remain readable for approved chats when no permission rule exists");
+      throw new Error("Public /model command should remain readable for approved chats when no permission rule exists");
     }
     const slashModelCommandAccess = await resolveTelegramChatAccess({
       chatId: "-1001234567890",
@@ -854,7 +857,7 @@ async function main() {
       command: "/model"
     });
     if (!slashModelCommandAccess.allowed) {
-      throw new Error("Hidden /model command access should normalize a leading slash");
+      throw new Error("Public /model command access should normalize a leading slash");
     }
     const scopedPermission = (await putCommandPermission({ chatId: "-1001234567890", command: "start", enabled: true })) as {
       data: { id: string };

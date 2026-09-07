@@ -12,7 +12,6 @@ import {
   listEffectiveChatModels,
   listEffectiveImageModels,
   listReminders,
-  switchEffectiveChatModel,
   switchEffectiveImageModel
 } from "@raiden/boot";
 import { updateTelegramChat } from "@raiden/database";
@@ -34,9 +33,11 @@ import {
   TelegramInteractionPolicy
 } from "./interaction-policy.js";
 import { telegramTaskId } from "./task-id.js";
+import { handleChatModelCallback, handleChatModelCommand } from "./model-menu.js";
 import { telegramRequestScope, telegramUpdateConstraint } from "./update-constraint.js";
 
 const publicBotCommands = [
+  { command: "model", description: "查看或切换当前私聊模型" },
   { command: "start", description: "开始与真对话" },
   { command: "menu", description: "打开功能菜单" },
   { command: "help", description: "查看使用说明" },
@@ -52,6 +53,7 @@ const publicBotCommands = [
 ];
 
 const groupBotCommands = [
+  { command: "model", description: "查看或切换本群模型（所有成员）" },
   { command: "start", description: "开始与真对话" },
   { command: "menu", description: "打开功能菜单" },
   { command: "help", description: "查看使用说明" },
@@ -75,7 +77,6 @@ const groupAdminCommands = [
 
 const botAdminCommands = [
   ...publicBotCommands,
-  { command: "model", description: "管理全局模型" },
   { command: "provider", description: "查看模型目录" },
   { command: "status", description: "查看安全运行状态" }
 ];
@@ -181,6 +182,7 @@ function unknownSlashCommand(text: string) {
 
 async function mainMenu(ctx: Context) {
   const keyboard = new InlineKeyboard().text("💬 与真聊天", "menu:chat").text("🎨 画一幅画", "menu:draw").row();
+  keyboard.text("切换语言模型", "model:page:0").row();
   if (ctx.chat?.type === "private") {
     keyboard
       .text("🧠 我的记忆", "menu:memory")
@@ -383,6 +385,7 @@ export function createRaidenBot(token: string) {
       [
         "直接私聊我即可对话；群聊中请回复我、@我，或用“雷电真/真姐姐/真大人/阿真”唤醒。",
         "/draw 描述 — 创建异步图片任务",
+        "/model — 查看支持的语言模型并切换；所有成员可用，各群与私聊独立",
         "/memory — 查看长期记忆（仅私聊）",
         "/privacy normal|isolated|off|forget — 管理记忆",
         "/clear — 清空当前聊天或话题的近期上下文",
@@ -578,27 +581,23 @@ export function createRaidenBot(token: string) {
   });
 
   bot.command("model", async (ctx) => {
-    if (!(await requireBotAdmin(ctx))) {
-      return;
-    }
     const [kindRaw, ...rest] = ctx.match.trim().split(/\s+/).filter(Boolean);
     const kind = kindRaw?.toLowerCase();
+    // Language selection is public and scoped. Legacy image selection stays global/admin-only.
+    const imageSelection = kind === "image" || (kind === "list" && rest[0]?.toLowerCase() === "image");
+    if (!imageSelection) {
+      await handleChatModelCommand(ctx, ctx.match);
+      return;
+    }
+    if (!(await requireBotAdmin(ctx))) return;
     try {
-      if (!kind) {
-        const [chat, image] = await Promise.all([listEffectiveChatModels(), listEffectiveImageModels()]);
-        await ctx.reply(`对话：${chat.currentModel}\n图片：${image.currentModel}\n/model list chat|image\n/model chat|image <model_id>`);
-        return;
-      }
       if (kind === "list") {
-        const capability = rest[0]?.toLowerCase() === "image" ? "image" : "chat";
-        const catalog = capability === "image" ? await listEffectiveImageModels(true) : await listEffectiveChatModels(true);
-        await replyTextChunks(ctx, formatModelCatalog(catalog, capability === "image" ? "当前图片模型" : "当前对话模型"));
+        await replyTextChunks(ctx, formatModelCatalog(await listEffectiveImageModels(true), "当前全局图片模型"));
         return;
       }
-      const imageSelection = kind === "image";
-      const modelId = imageSelection || kind === "chat" ? rest.join(" ") : [kindRaw, ...rest].join(" ");
+      const modelId = rest.join(" ");
       if (!modelId) {
-        await ctx.reply("用法：/model chat|image <model_id>");
+        await ctx.reply("用法：/model image <model_id>（全局图片模型，仅 Bot 管理员）");
         return;
       }
       const actor = {
@@ -607,17 +606,19 @@ export function createRaidenBot(token: string) {
         actorUsername: telegramActorName(ctx),
         chatId: ctx.chat?.id === undefined ? null : String(ctx.chat.id)
       };
-      const result = imageSelection ? await switchEffectiveImageModel(actor) : await switchEffectiveChatModel(actor);
+      const result = await switchEffectiveImageModel(actor);
       await ctx.reply(
         result.beforeModel === result.afterModel
-          ? `当前已经是：${result.afterModel}`
-          : `模型已切换：${result.beforeModel} → ${result.afterModel}`
+          ? `全局图片模型已经是：${result.afterModel}`
+          : `全局图片模型已切换：${result.beforeModel} → ${result.afterModel}`
       );
     } catch (error) {
       console.error("Admin model operation failed", safeErrorMessage(error));
       await ctx.reply("模型操作失败。请在后台 System 页查看目录或服务日志（MODEL_OPERATION_FAILED）。");
     }
   });
+
+  bot.callbackQuery(/^model:/, handleChatModelCallback);
 
   bot.command("provider", async (ctx) => {
     if (!(await requireBotAdmin(ctx))) {

@@ -57,6 +57,13 @@
       "when": 1788633003879,
       "tag": "0007_slippery_kate_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788799589369,
+      "tag": "0008_concerned_christian_walker",
+      "breakpoints": true
     }
   ]
 }

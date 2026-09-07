@@ -41,6 +41,10 @@ function telegramScope(ctx: Context) {
   };
 }
 
+export function telegramConversationContext(ctx: Context) {
+  return { ...telegramIdentity(ctx), ...telegramScope(ctx) };
+}
+
 export async function rememberTelegramUser(ctx: Context) {
   if (!ctx.from) {
     return null;
