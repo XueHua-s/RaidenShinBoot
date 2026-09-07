@@ -31,6 +31,10 @@
   "devDependencies": {
     "@commitlint/cli": "19.8.1",
     "@commitlint/config-conventional": "19.8.1",
+    "@raiden/boot": "workspace:*",
+    "@raiden/database": "workspace:*",
+    "@raiden/server": "workspace:*",
+    "@raiden/shared": "workspace:*",
     "@types/node": "^22.18.12",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
