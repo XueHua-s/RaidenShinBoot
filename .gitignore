@@ -9,6 +9,7 @@ dist
 .specs/
 coverage
 logs/
+/backups/
 *.tsbuildinfo
 __pycache__/
 *.py[cod]

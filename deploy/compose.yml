@@ -1,0 +1,158 @@
+# Run from the repository root:
+# docker-compose --env-file .env -p raiden -f deploy/compose.yml up -d
+x-service: &service
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-node: &node
+  <<: *service
+  image: raiden-node:${RAIDEN_IMAGE_TAG:?Set RAIDEN_IMAGE_TAG}
+  working_dir: /app
+  env_file: ../.env
+  environment: &node-env
+    DATABASE_URL: postgres://raiden:${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD}@postgres:5432/raiden_shin_boot
+    REDIS_URL: redis://redis:6379
+    BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
+    NODE_OPTIONS: --max-old-space-size=256
+  stop_grace_period: 210s
+
+services:
+  postgres:
+    <<: *service
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: raiden
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: raiden_shin_boot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U raiden -d raiden_shin_boot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    <<: *service
+    image: redis/redis-stack-server:7.4.0-v8
+    environment:
+      REDIS_ARGS: --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  embedding:
+    <<: *service
+    image: raiden-embedding:${RAIDEN_IMAGE_TAG:?Set RAIDEN_IMAGE_TAG}
+    environment:
+      EMBEDDING_HOST: 0.0.0.0
+      EMBEDDING_PORT: 8080
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_DIMENSIONS: 512
+      EMBEDDING_MODEL_SOURCE: modelscope
+      EMBEDDING_TORCH_THREADS: 2
+      MODELSCOPE_MODEL_ID: AI-ModelScope/bge-small-zh-v1.5
+      MODELSCOPE_MODEL_REVISION: master
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - embedding_models:/models
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=5).read()"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  migrate:
+    <<: *node
+    restart: "no"
+    command: [pnpm, db:migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  embedding-backfill:
+    <<: *node
+    restart: "no"
+    command: [pnpm, db:backfill-embeddings]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      embedding:
+        condition: service_healthy
+
+  api:
+    <<: *node
+    command: [pnpm, --filter, "@raiden/server", start]
+    environment:
+      <<: *node-env
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8787
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      embedding-backfill:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  panel:
+    <<: *service
+    image: raiden-panel:${RAIDEN_IMAGE_TAG:?Set RAIDEN_IMAGE_TAG}
+    ports:
+      - "${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-5173}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      api:
+        condition: service_healthy
+
+  bot:
+    <<: *node
+    command: [pnpm, --filter, "@raiden/bot", start]
+    environment:
+      <<: *node-env
+      BOT_RUNTIME_MODE: polling
+      BOT_POLLING_CONCURRENCY: 4
+    depends_on:
+      embedding-backfill:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  bot-worker:
+    <<: *node
+    command: [pnpm, --filter, "@raiden/bot", start:worker]
+    environment:
+      <<: *node-env
+      BOT_RUNTIME_MODE: worker
+      BOOT_MEMORY_ENRICHMENT_ASYNC_ENABLED: "true"
+      BOOT_MEMORY_WORKER_CONCURRENCY: 1
+      BOOT_IMAGE_WORKER_CONCURRENCY: 1
+    depends_on:
+      embedding-backfill:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  embedding_models:

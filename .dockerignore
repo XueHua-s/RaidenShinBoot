@@ -5,6 +5,7 @@ dist
 .git
 .idea
 logs
+backups
 .env
 .env.*
 !.env.example
