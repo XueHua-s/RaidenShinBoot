@@ -1,5 +1,10 @@
 import { getBootQueueConfig } from "@raiden/boot";
 import { decodeTelegramPhoto } from "../packages/bot/src/image-output.js";
+import {
+  containsTelegramReplyKeyword,
+  parseTelegramReplyKeywords,
+  TelegramInteractionPolicy
+} from "../packages/bot/src/interaction-policy.js";
 import { telegramTaskId } from "../packages/bot/src/task-id.js";
 import { telegramUpdateConstraint } from "../packages/bot/src/update-constraint.js";
 
@@ -29,6 +34,28 @@ assert(pauseConstraint !== chatConstraint, "/pause must bypass the active chat's
 assert(addressedPauseConstraint === pauseConstraint, "Addressed /pause must use the control lock");
 assert(resumeConstraint === pauseConstraint, "Control commands in one scope must preserve update order");
 assert(similarCommandConstraint === chatConstraint, "Commands that only share a prefix must keep the chat lock");
+
+const replyKeywords = parseTelegramReplyKeywords("雷电真, 真姐姐,雷电真");
+assert(replyKeywords.length === 2, "Configured reply keywords must be trimmed and deduplicated");
+assert(
+  containsTelegramReplyKeyword("我想问雷电真一个问题", replyKeywords),
+  "A configured reply keyword must match anywhere in a group message"
+);
+const interactionPolicy = new TelegramInteractionPolicy();
+const keywordInput = {
+  chatId: "-1001",
+  userId: "7",
+  text: "我想问雷电真一个问题",
+  replyMode: "social" as const,
+  directlyMentioned: false,
+  replyingToBot: false,
+  wakeWord: true
+};
+assert(
+  interactionPolicy.decide({ ...keywordInput, messageId: 10, now: 1_000 }) === "reply" &&
+    interactionPolicy.decide({ ...keywordInput, messageId: 11, now: 2_000 }) === "reply",
+  "Every message containing a reply keyword must trigger without a cooldown"
+);
 
 assert(
   getBootQueueConfig({ REDIS_URL: "redis://127.0.0.1:6379" }).telegramConcurrency === 8,

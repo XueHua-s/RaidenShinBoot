@@ -2,6 +2,21 @@ import type { TelegramReplyMode } from "@raiden/shared";
 
 export type GroupInteractionDecision = "ignore" | "react" | "reply";
 
+const defaultTelegramReplyKeywords = ["雷电真", "真姐姐", "真大人", "阿真"] as const;
+
+export function parseTelegramReplyKeywords(value: string | undefined) {
+  const configured = value
+    ?.split(",")
+    .map((keyword) => keyword.trim())
+    .filter(Boolean);
+  return configured?.length ? Array.from(new Set(configured)) : [...defaultTelegramReplyKeywords];
+}
+
+export function containsTelegramReplyKeyword(text: string, keywords: readonly string[]) {
+  const normalizedText = text.toLocaleLowerCase("zh-CN");
+  return keywords.some((keyword) => normalizedText.includes(keyword.toLocaleLowerCase("zh-CN")));
+}
+
 type GroupInteractionInput = {
   chatId: string;
   userId: string;
@@ -17,7 +32,6 @@ type GroupInteractionInput = {
 export class TelegramInteractionPolicy {
   private readonly lastReplyAt = new Map<string, number>();
   private readonly lastReactionAt = new Map<string, number>();
-  private readonly lastWakeAt = new Map<string, number>();
 
   decide(input: GroupInteractionInput): GroupInteractionDecision {
     const now = input.now ?? Date.now();
@@ -27,11 +41,6 @@ export class TelegramInteractionPolicy {
     }
 
     if (input.wakeWord && input.replyMode !== "quiet") {
-      const wakeKey = `${input.chatId}:${input.userId}`;
-      if (now - (this.lastWakeAt.get(wakeKey) ?? 0) < 20_000) {
-        return "ignore";
-      }
-      recordActivity(this.lastWakeAt, wakeKey, now);
       recordActivity(this.lastReplyAt, input.chatId, now);
       return "reply";
     }

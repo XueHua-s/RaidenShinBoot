@@ -28,7 +28,11 @@ import {
   setPrivacyMode,
   summarizeCurrentConversation
 } from "./conversation.js";
-import { TelegramInteractionPolicy } from "./interaction-policy.js";
+import {
+  containsTelegramReplyKeyword,
+  parseTelegramReplyKeywords,
+  TelegramInteractionPolicy
+} from "./interaction-policy.js";
 import { telegramTaskId } from "./task-id.js";
 import { telegramRequestScope, telegramUpdateConstraint } from "./update-constraint.js";
 
@@ -339,10 +343,6 @@ function replyToBot(ctx: Context) {
   return ctx.message?.reply_to_message?.from?.id === ctx.me.id;
 }
 
-function containsWakeWord(text: string) {
-  return /(^|[\s，,。！？!?、])(?:雷电真|真姐姐|真大人|阿真)(?=$|[\s，,。！？!?、])/u.test(text);
-}
-
 function stripBotMention(ctx: Context, text: string) {
   const username = ctx.me.username;
   return username ? text.replace(new RegExp(`@${username}\\b`, "gi"), "").trim() : text;
@@ -365,6 +365,7 @@ export function createRaidenBot(token: string) {
   const activeRequests = new Map<string, ActiveRequest>();
   const pausedScopes = new Set<string>();
   const interactionPolicy = new TelegramInteractionPolicy();
+  const replyKeywords = parseTelegramReplyKeywords(process.env.BOT_REPLY_KEYWORDS);
 
   bot.use(sequentialize(telegramUpdateConstraint));
   bot.use(enforceTelegramAccess);
@@ -798,7 +799,7 @@ export function createRaidenBot(token: string) {
     if (ctx.chat.type !== "private") {
       const mentioned = directMention(ctx, rawText);
       const replied = replyToBot(ctx);
-      const wakeWord = containsWakeWord(rawText);
+      const wakeWord = containsTelegramReplyKeyword(rawText, replyKeywords);
       const decision = interactionPolicy.decide({
         chatId: String(ctx.chat.id),
         userId: String(ctx.from.id),
