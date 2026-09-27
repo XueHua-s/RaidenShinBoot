@@ -1,10 +1,12 @@
 import { config } from "dotenv";
 import {
   closeDatabase,
+  getSqlClient,
   listMemoriesPendingLocalEmbedding,
   updateMemoryLocalEmbedding
 } from "@raiden/database";
-import { embedDocument, getBootConfig } from "@raiden/shared/boot";
+import { embedDocument } from "@raiden/shared/boot";
+import { getEffectiveBootConfig } from "@raiden/boot";
 
 config({ path: new URL("../.env", import.meta.url) });
 config();
@@ -20,7 +22,13 @@ function readBatchSize(argv: string[]) {
 
 async function main() {
   const batchSize = readBatchSize(process.argv.slice(2));
-  const bootConfig = getBootConfig();
+  const bootConfig = await getEffectiveBootConfig();
+  // FIXED: Filling gaps cannot safely migrate a populated vector space.
+  const sql = getSqlClient();
+  const stale = await sql`select id from memories where deleted_at is null and embedding_local is not null
+    and (embedding_model is distinct from ${bootConfig.BOOT_EMBEDDING_MODEL}
+      or embedding_dimensions is distinct from ${bootConfig.BOOT_EMBEDDING_DIMENSIONS}) limit 1`;
+  if (stale.length) throw new Error("Existing memories use another embedding model; stop writers, back up the database and run db:reembed-memories -- --apply first.");
   let updated = 0;
 
   while (true) {
@@ -39,7 +47,7 @@ async function main() {
       updated += 1;
     }
 
-    console.log(`Backfilled ${updated} local memory embeddings.`);
+    console.log(`Backfilled ${updated} memory embeddings.`);
   }
 
   console.log(

@@ -42,7 +42,7 @@ const bootEnvSchema = z.object({
   BOOT_EMBEDDING_DIMENSIONS: z.coerce
     .number()
     .int()
-    .refine((value) => value === 512, "BOOT_EMBEDDING_DIMENSIONS must remain 512 for the local memory schema")
+    .refine((value) => value === 512, "BOOT_EMBEDDING_DIMENSIONS must remain 512 for the memory schema")
     .optional(),
   BOOT_IMAGE_BASE_URL: optionalUrl,
   BOOT_IMAGE_MODEL: optionalString,
@@ -196,7 +196,9 @@ function resolveApiKey(value: string | undefined, purpose: "chat" | "embedding" 
 
 function createEmbeddingProvider(config = getBootConfig()) {
   return createOpenAI({
-    apiKey: config.BOOT_EMBEDDING_API_KEY ?? "local-embedding-only",
+    apiKey: config.MODEL_CONFIGURATION.embedding.kind === "local-openai-compatible"
+      ? config.BOOT_EMBEDDING_API_KEY ?? "local-embedding-only"
+      : resolveApiKey(config.BOOT_EMBEDDING_API_KEY, "embedding"),
     baseURL: config.BOOT_EMBEDDING_BASE_URL
   });
 }
@@ -816,7 +818,7 @@ function pruneChatProbeCache(now: number, maxAgeMs: number) {
   }
 }
 
-async function embedLocalText(
+async function embedConfiguredText(
   value: string,
   inputType: "query" | "document",
   config = getBootConfig(),
@@ -827,6 +829,8 @@ async function embedLocalText(
   try {
     result = await embed({
       model: provider.embedding(config.BOOT_EMBEDDING_MODEL),
+      // FIXED: Remote defaults may exceed the database's halfvec(512) dimension.
+      providerOptions: { openai: { dimensions: config.BOOT_EMBEDDING_DIMENSIONS } },
       value: inputType === "query" ? `${config.BOOT_EMBEDDING_QUERY_PREFIX}${value}` : value,
       abortSignal: abortSignal
         ? AbortSignal.any([abortSignal, timeoutSignal(config.BOOT_EMBEDDING_TIMEOUT_MS)])
@@ -835,11 +839,11 @@ async function embedLocalText(
   } catch (error) {
     if (isAbortError(error)) {
       if (abortSignal?.aborted) {
-        throw new BootProviderError("Local embedding was cancelled.", 499);
+        throw new BootProviderError("Embedding was cancelled.", 499);
       }
-      throw new BootProviderError(`Local embedding timed out after ${config.BOOT_EMBEDDING_TIMEOUT_MS}ms.`, 504);
+      throw new BootProviderError(`Embedding timed out after ${config.BOOT_EMBEDDING_TIMEOUT_MS}ms.`, 504);
     }
-    throw new BootProviderError(`Local embedding failed: ${errorMessage(error)}`, 502);
+    throw new BootProviderError(`Embedding failed: ${errorMessage(error)}`, 502);
   }
 
   if (result.embedding.length !== config.BOOT_EMBEDDING_DIMENSIONS) {
@@ -848,18 +852,22 @@ async function embedLocalText(
     );
   }
 
-  return result.embedding;
+  const magnitude = Math.sqrt(result.embedding.reduce((sum, value) => sum + value * value, 0));
+  if (!result.embedding.every(Number.isFinite) || !Number.isFinite(magnitude) || magnitude === 0) {
+    throw new BootProviderError("Embedding provider returned an invalid or zero vector.");
+  }
+  return result.embedding.map((value) => value / magnitude);
 }
 
 export function embedQuery(value: string, config = getBootConfig(), abortSignal?: AbortSignal) {
-  return embedLocalText(value, "query", config, abortSignal);
+  return embedConfiguredText(value, "query", config, abortSignal);
 }
 
 export function embedDocument(value: string, config = getBootConfig(), abortSignal?: AbortSignal) {
-  return embedLocalText(value, "document", config, abortSignal);
+  return embedConfiguredText(value, "document", config, abortSignal);
 }
 
-/** @deprecated Use embedQuery or embedDocument so BGE receives the correct retrieval prefix. */
+/** @deprecated Use embedQuery or embedDocument to apply the configured query/document behavior. */
 export function embedText(value: string, config = getBootConfig()) {
   return embedDocument(value, config);
 }

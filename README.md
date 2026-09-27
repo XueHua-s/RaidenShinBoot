@@ -291,3 +291,11 @@ DocCopilot 专属技能没有复制。本项目的替代技能位于 `skills/rai
 ## 人格说明
 
 雷电真被建模为温柔、敏锐、有人情味，并珍视流逝瞬间之美的角色。人格源文件位于 `personas/raiden-makoto.persona`，采用英文声明式 DSL；运行时校验大写 token 的格式并确定性编译为中文 prompt，内置 token 有自然中文释义，新 token 会按下划线拆成可读英文，因此维护者增加性格、意象或关系时无需修改 TypeScript。每个 conversation 记录人格版本与 SHA-256；文件修改可热加载，解析失败时继续使用上一个有效版本。
+
+### 远端记忆嵌入部署
+
+当前默认嵌入模型为远端 `qwen3.7-text-embedding-flash`。`BOOT_EMBEDDING_API_KEY` 必填，
+接口显式请求 512 维并归一化；数据库继续使用 `embedding_local` / `halfvec(512)`，
+不再需要启动或下载本地模型。此前关于本地 BGE 服务的章节仅适用于旧版本。
+已有记忆必须重新嵌入，不能只改模型名称。停写、备份、原子迁移和缓存隔离步骤见
+[Docker 部署说明](deploy/README.md#migrating-existing-memory-vectors)。
