@@ -16,7 +16,6 @@ x-node: &node
   environment: &node-env
     DATABASE_URL: postgres://raiden:${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD}@postgres:5432/raiden_shin_boot
     REDIS_URL: redis://redis:6379
-    BOOT_EMBEDDING_BASE_URL: http://embedding:8080/v1
     NODE_OPTIONS: --max-old-space-size=256
   stop_grace_period: 210s
 
@@ -49,28 +48,6 @@ services:
       timeout: 5s
       retries: 10
 
-  embedding:
-    <<: *service
-    image: raiden-embedding:${RAIDEN_IMAGE_TAG:?Set RAIDEN_IMAGE_TAG}
-    environment:
-      EMBEDDING_HOST: 0.0.0.0
-      EMBEDDING_PORT: 8080
-      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
-      EMBEDDING_DIMENSIONS: 512
-      EMBEDDING_MODEL_SOURCE: modelscope
-      EMBEDDING_TORCH_THREADS: 2
-      MODELSCOPE_MODEL_ID: AI-ModelScope/bge-small-zh-v1.5
-      MODELSCOPE_MODEL_REVISION: master
-      HF_HUB_DISABLE_XET: "1"
-    volumes:
-      - embedding_models:/models
-    healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=5).read()"]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-      start_period: 90s
-
   migrate:
     <<: *node
     restart: "no"
@@ -86,8 +63,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      embedding:
-        condition: service_healthy
 
   api:
     <<: *node
@@ -155,4 +130,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  embedding_models:

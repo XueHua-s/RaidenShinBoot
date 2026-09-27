@@ -85,14 +85,14 @@ export const modelConfigurationSchema = z
       .strict(),
     embedding: z
       .object({
-        kind: z.literal("local-openai-compatible"),
-        baseUrl: z.string().url().default("http://127.0.0.1:8080/v1"),
+        kind: z.enum(["openai-compatible", "local-openai-compatible"]),
+        baseUrl: z.string().url().default("https://ws-d6xu5os7fn629sa4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"),
         baseUrlEnv: envNameSchema.default("BOOT_EMBEDDING_BASE_URL"),
         apiKeyEnv: envNameSchema.default("BOOT_EMBEDDING_API_KEY"),
-        model: modelIdSchema.default("BAAI/bge-small-zh-v1.5"),
+        model: modelIdSchema.default("qwen3.7-text-embedding-flash"),
         dimensions: z.literal(512).default(512),
         normalized: z.literal(true).default(true),
-        queryPrefix: z.string().max(200).default("为这个句子生成表示以用于检索相关文章：")
+        queryPrefix: z.string().max(200).default("")
       })
       .strict(),
     probes: z
@@ -159,9 +159,9 @@ export const defaultModelConfiguration = modelConfigurationSchema.parse({
     }
   },
   embedding: {
-    kind: "local-openai-compatible",
-    baseUrl: "http://127.0.0.1:8080/v1",
-    model: "BAAI/bge-small-zh-v1.5",
+    kind: "openai-compatible",
+    baseUrl: "https://ws-d6xu5os7fn629sa4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    model: "qwen3.7-text-embedding-flash",
     dimensions: 512,
     normalized: true
   }

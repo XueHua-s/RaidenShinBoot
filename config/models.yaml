@@ -42,14 +42,14 @@ routing:
     async: true
 
 embedding:
-  kind: local-openai-compatible
-  baseUrl: http://127.0.0.1:8080/v1
+  kind: openai-compatible
+  baseUrl: https://ws-d6xu5os7fn629sa4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
   baseUrlEnv: BOOT_EMBEDDING_BASE_URL
   apiKeyEnv: BOOT_EMBEDDING_API_KEY
-  model: BAAI/bge-small-zh-v1.5
+  model: qwen3.7-text-embedding-flash
   dimensions: 512
   normalized: true
-  queryPrefix: "为这个句子生成表示以用于检索相关文章："
+  queryPrefix: ""
 
 probes:
   beforePublish: true

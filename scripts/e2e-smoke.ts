@@ -112,6 +112,7 @@ async function main() {
   process.env.BOOT_MEMORY_MODEL = "mock-chat";
   process.env.BOOT_TOOL_MODEL = "mock-chat";
   process.env.BOOT_EMBEDDING_MODEL = "mock-embedding";
+  process.env.BOOT_EMBEDDING_API_KEY = "e2e-local-key";
   process.env.BOOT_IMAGE_MODEL = "gpt-image-2-codex";
   process.env.BOOT_SEARCH_PROVIDER = "tavily";
   process.env.BOOT_SEARCH_BASE_URL = `http://127.0.0.1:${port}`;
@@ -197,6 +198,7 @@ async function main() {
   }
 
   const baseCacheFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -208,6 +210,7 @@ async function main() {
     memories: []
   });
   const changedHistoryFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -219,6 +222,7 @@ async function main() {
     memories: []
   });
   const changedMemoryFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -238,6 +242,7 @@ async function main() {
     ]
   });
   const changedPersonaFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -249,6 +254,7 @@ async function main() {
     memories: []
   });
   const changedDisplayNameFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -1357,6 +1363,7 @@ async function waitForConversationExactCacheHit(input: Parameters<typeof runBoot
       getEffectiveBootSearchConfig()
     ]);
     const contextFingerprint = buildConversationCacheContextFingerprint({
+      privacyMode: "normal",
       protocol: input.protocol,
       userId: input.userId,
       chatModel: bootConfig.BOOT_CHAT_MODEL,
