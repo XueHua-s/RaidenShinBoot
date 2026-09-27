@@ -51,7 +51,7 @@ function reminderInput(taskId: string, userId: string, dueAt: string): ReminderJ
 async function waitForImageState(
   taskId: string,
   userId: string,
-  expectedState: "completed" | "failed",
+  expectedState: "completed" | "failed" | "delayed",
   config: BootQueueConfig
 ) {
   const deadline = Date.now() + 12_000;
@@ -92,17 +92,14 @@ async function main() {
     await Promise.all([imageQueue.waitUntilReady(), reminderQueue.waitUntilReady()]);
 
     const quotaUserId = "queue-smoke-quota-user";
-    const concurrentInputs = [
-      imageInput(randomUUID(), quotaUserId),
-      imageInput(randomUUID(), quotaUserId)
-    ] as const;
+    const concurrentInputs = Array.from({ length: 8 }, () => imageInput(randomUUID(), quotaUserId));
     const concurrentResults = await Promise.allSettled(
       concurrentInputs.map((input) => enqueueImageGeneration(input, config))
     );
     const accepted = concurrentResults.filter((result) => result.status === "fulfilled");
     const rejected = concurrentResults.filter((result) => result.status === "rejected");
     assert(accepted.length === 1, "Concurrent image quota must atomically accept exactly one job");
-    assert(rejected.length === 1, "Concurrent image quota must reject exactly one job");
+    assert(rejected.length === concurrentInputs.length - 1, "Concurrent image quota must reject every competing job");
     const acceptedTaskId = accepted[0]?.value.id;
     const quotaError = rejected[0]?.reason;
     assert(typeof acceptedTaskId === "string", "Accepted image job must have an id");
@@ -162,6 +159,10 @@ async function main() {
       throw new Error("expected queue smoke failure");
     }, config);
     await worker.waitUntilReady();
+    await waitForImageState(failedInput.taskId, failedInput.userId, "delayed", config);
+    const retryAdmission = await Promise.allSettled([enqueueImageGeneration(imageInput(randomUUID(), failedInput.userId), config)]);
+    assert(retryAdmission[0]?.status === "rejected" && retryAdmission[0].reason instanceof ImageGenerationQuotaError,
+      "An image task awaiting retry must retain its per-user quota");
     await waitForImageState(failedInput.taskId, failedInput.userId, "failed", config);
     await worker.close();
     worker = null;

@@ -198,6 +198,7 @@ async function main() {
   }
 
   const baseCacheFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -209,6 +210,7 @@ async function main() {
     memories: []
   });
   const changedHistoryFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -220,6 +222,7 @@ async function main() {
     memories: []
   });
   const changedMemoryFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -239,6 +242,7 @@ async function main() {
     ]
   });
   const changedPersonaFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -250,6 +254,7 @@ async function main() {
     memories: []
   });
   const changedDisplayNameFingerprint = buildConversationCacheContextFingerprint({
+    privacyMode: "normal",
     protocol: "telegram",
     userId: "e2e-cache-user",
     chatModel: "mock-chat",
@@ -1358,6 +1363,7 @@ async function waitForConversationExactCacheHit(input: Parameters<typeof runBoot
       getEffectiveBootSearchConfig()
     ]);
     const contextFingerprint = buildConversationCacheContextFingerprint({
+      privacyMode: "normal",
       protocol: input.protocol,
       userId: input.userId,
       chatModel: bootConfig.BOOT_CHAT_MODEL,
